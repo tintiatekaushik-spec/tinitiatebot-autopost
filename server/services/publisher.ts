@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import { automationInput, updateUploadStatus } from "../storage.js";
+import { postToInstagram } from "./publishers/instagram.js";
 import { postToLinkedIn } from "./publishers/linkedin.js";
 import { postToYouTube } from "./publishers/youtube.js";
 import path from "path";
@@ -69,18 +70,20 @@ export async function runAutomation() {
 
   const youtubeUploads = channels.youtube || [];
   const linkedinUploads = channels.linkedin || [];
+  const instagramUploads = channels.instagram || [];
 
-  if (youtubeUploads.length === 0 && linkedinUploads.length === 0) {
-    console.log("No queued uploads for YouTube or LinkedIn.");
+  if (youtubeUploads.length === 0 && linkedinUploads.length === 0 && instagramUploads.length === 0) {
+    console.log("No queued uploads for YouTube, LinkedIn, or Instagram.");
     return;
   }
 
   prepareChromeProfile();
+  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
 
   const browser = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     channel: "chrome",
-    slowMo: 350,
+    slowMo: slowMoMs,
     viewport: null,
     args: [
       "--disable-blink-features=AutomationControlled",
@@ -126,6 +129,22 @@ export async function runAutomation() {
           hadFailure = true;
           await updateUploadStatus(upload.id, "failed");
           console.error(`Failed ${upload.id} on LinkedIn: ${error.message}`);
+        }
+      }
+    }
+
+    if (instagramUploads.length > 0) {
+      for (const upload of instagramUploads) {
+        await updateUploadStatus(upload.id, "processing");
+
+        try {
+          await postToInstagram(page, upload);
+          await updateUploadStatus(upload.id, "posted");
+          console.log(`Posted ${upload.id} to Instagram.`);
+        } catch (error: any) {
+          hadFailure = true;
+          await updateUploadStatus(upload.id, "failed");
+          console.error(`Failed ${upload.id} on Instagram: ${error.message}`);
         }
       }
     }
