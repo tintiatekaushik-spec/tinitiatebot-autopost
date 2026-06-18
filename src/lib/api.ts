@@ -27,24 +27,37 @@ export function assetUrl(url: string) {
 
 export const api = {
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
+  
   uploads: (platform?: Platform) => request<PlatformUpload[]>(`/api/uploads${platform ? `?platform=${platform}` : ""}`),
-  uploadToPlatform: (platform: Platform, file: File) => {
+  
+  // 👈 UPDATED: Added 'title' parameter
+  uploadToPlatform: (platform: Platform, file: File, title: string, caption: string, scheduledAt?: string) => {
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("title", title);
+    formData.append("caption", caption);
+    if (scheduledAt) formData.append("scheduledAt", scheduledAt);
 
     return request<PlatformUpload>(`/api/platforms/${platform}/uploads`, {
       method: "POST",
       body: formData
     });
   },
+  
   updateUploadStatus: (id: string, payload: UpdateUploadStatusInput) =>
     request<PlatformUpload>(`/api/uploads/${id}/status`, {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
+    
   deleteUpload: (id: string) =>
     request<void>(`/api/uploads/${id}`, {
       method: "DELETE"
     }),
-  automationInput: () => request<AutomationInput>("/api/automation/input")
+    
+  automationInput: () => request<AutomationInput>("/api/automation/input"),
+  
+  runAutomation: () => request<{ message: string }>("/api/automation/run", {
+    method: "POST"
+  })
 };

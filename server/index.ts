@@ -14,6 +14,8 @@ import {
   listUploads,
   updateUploadStatus
 } from "./storage";
+import { runAutomation } from "./services/publisher.js";
+import "dotenv/config"; // 👈 IMPORTANT: Load .env file
 
 const app = express();
 const port = Number(process.env.PORT ?? 4100);
@@ -55,6 +57,7 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 app.use("/uploads", express.static(uploadDir));
 
+// --- HEALTH ---
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
@@ -64,6 +67,7 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+// --- DASHBOARD ---
 app.get("/api/dashboard", async (_req, res, next) => {
   try {
     res.json(await dashboardSummary());
@@ -72,6 +76,7 @@ app.get("/api/dashboard", async (_req, res, next) => {
   }
 });
 
+// --- LIST UPLOADS ---
 app.get("/api/uploads", async (req, res, next) => {
   try {
     const platform = req.query.platform ? platformSchema.parse(req.query.platform) : undefined;
@@ -90,12 +95,19 @@ app.get("/api/platforms/:platform/uploads", async (req, res, next) => {
   }
 });
 
+// --- CREATE UPLOAD (with Title, Caption, ScheduledAt) ---
 app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, res, next) => {
   try {
     const platform = platformSchema.parse(req.params.platform);
+    const { title, caption, scheduledAt } = req.body; // 👈 EXTRACT TITLE
 
     if (!req.file) {
       res.status(400).json({ message: "Upload a file with form field name `file`." });
+      return;
+    }
+
+    if (!caption || typeof caption !== 'string' || caption.trim().length === 0) {
+      res.status(400).json({ message: "Caption is required." });
       return;
     }
 
@@ -104,7 +116,10 @@ app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, 
       fileName: req.file.filename,
       mimeType: req.file.mimetype,
       size: req.file.size,
-      url: `/uploads/${req.file.filename}`
+      url: `/uploads/${req.file.filename}`,
+      title: title?.trim() || caption.trim(), // 👈 Use title if provided, else fallback
+      caption: caption.trim(),
+      scheduledAt: scheduledAt || undefined
     });
 
     res.status(201).json(item);
@@ -113,6 +128,7 @@ app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, 
   }
 });
 
+// --- UPDATE STATUS ---
 app.patch("/api/uploads/:id/status", async (req, res, next) => {
   try {
     const payload = updateUploadStatusSchema.parse(req.body);
@@ -129,6 +145,7 @@ app.patch("/api/uploads/:id/status", async (req, res, next) => {
   }
 });
 
+// --- DELETE UPLOAD ---
 app.delete("/api/uploads/:id", async (req, res, next) => {
   try {
     const deleted = await deleteUpload(req.params.id);
@@ -149,6 +166,7 @@ app.delete("/api/uploads/:id", async (req, res, next) => {
   }
 });
 
+// --- AUTOMATION INPUT ---
 app.get("/api/automation/input", async (_req, res, next) => {
   try {
     res.json(await automationInput());
@@ -166,6 +184,17 @@ app.get("/api/automation/platforms/:platform/input", async (req, res, next) => {
   }
 });
 
+// --- TRIGGER AUTOMATION ---
+app.post("/api/automation/run", async (req, res, next) => {
+  try {
+    runAutomation().catch(err => console.error("Background error:", err));
+    res.json({ message: "Publisher automation started. Check server logs." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- ERROR HANDLER ---
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof ZodError) {
     res.status(400).json({

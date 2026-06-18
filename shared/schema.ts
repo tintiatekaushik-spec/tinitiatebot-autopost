@@ -53,9 +53,12 @@ export const platformUploadSchema = z.object({
   extension: z.string(),
   size: z.number(),
   url: z.string(),
+  title: z.string().optional(), // 👈 NEW TITLE FIELD
+  caption: z.string().min(1, "Caption is required"),
   status: uploadStatusSchema,
   uploadedAt: z.string(),
   updatedAt: z.string(),
+  scheduledAt: z.string().optional(),
   automation: uploadAutomationSchema
 });
 

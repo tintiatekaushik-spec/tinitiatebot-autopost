@@ -1,453 +1,370 @@
-import { FileArchive, FileText, Loader2, Trash2, Upload } from "lucide-react";
-import type { CSSProperties } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { 
+  BarChart3, Clock, CheckCircle2, AlertCircle, 
+  Loader2, Play, RefreshCw, Upload, X, 
+  FileText, Trash2, TrendingUp
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import type { Platform, PlatformUpload } from "../shared/schema";
 import { platformLabels, platforms } from "../shared/schema";
 import { api, assetUrl } from "./lib/api";
+import {
+  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, 
+  Tooltip, ResponsiveContainer, CartesianGrid
+} from "recharts";
 
-type PlatformTone = {
-  accent: string;
-  ink: string;
-  soft: string;
-  ring: string;
+// --- PURE CUSTOM SVG ICONS (NO EMOJIS) ---
+const CustomIcon = ({ platform, size = 28 }: { platform: Platform; size?: number }) => {
+  const s = size;
+  const styles = { width: s, height: s, display: 'block' };
+
+  switch(platform) {
+    case 'youtube':
+      return (
+        <svg style={styles} viewBox="0 0 24 24" fill="none">
+          <rect width="24" height="24" rx="6" fill="#FF0000" />
+          <path d="M10 8.5L16 12L10 15.5V8.5Z" fill="#FFFFFF" />
+        </svg>
+      );
+    case 'x':
+      return (
+        <svg style={styles} viewBox="0 0 24 24" fill="none">
+          <rect width="24" height="24" rx="6" fill="#000000" />
+          <path d="M17.176 5.5h1.935l-4.229 4.833 4.973 6.567h-3.892l-3.048-3.985-3.487 3.985H5.49l4.519-5.165L5.118 5.5h3.99l2.754 3.641L17.176 5.5zm-.678 10.226h1.072L7.61 6.72H6.455l9.043 9.006z" fill="#FFFFFF" />
+        </svg>
+      );
+    case 'instagram':
+      return (
+        <svg style={styles} viewBox="0 0 24 24" fill="none">
+          <defs>
+            <linearGradient id="instaGrad" x1="2" y1="2" x2="22" y2="22">
+              <stop offset="0%" stopColor="#FEDA75"/><stop offset="26%" stopColor="#FA7E1E"/>
+              <stop offset="49%" stopColor="#D62976"/><stop offset="75%" stopColor="#962FBF"/>
+              <stop offset="100%" stopColor="#4F5BD5"/>
+            </linearGradient>
+          </defs>
+          <rect width="24" height="24" rx="6" fill="url(#instaGrad)" />
+          <rect x="5.5" y="5.5" width="13" height="13" rx="3" fill="none" stroke="#FFFFFF" strokeWidth="2"/>
+          <circle cx="17.5" cy="6.5" r="1.5" fill="#FFFFFF"/>
+        </svg>
+      );
+    case 'linkedin':
+      return (
+        <svg style={styles} viewBox="0 0 24 24" fill="none">
+          <rect width="24" height="24" rx="6" fill="#0A66C2" />
+          <path d="M7.5 9.5H10V17H7.5V9.5Z" fill="#FFFFFF"/>
+          <path d="M8.75 6.75C9.57843 6.75 10.25 7.42157 10.25 8.25C10.25 9.07843 9.57843 9.75 8.75 9.75C7.92157 9.75 7.25 9.07843 7.25 8.25C7.25 7.42157 7.92157 6.75 8.75 6.75Z" fill="#FFFFFF"/>
+          <path d="M15.5 9.5C16.5 9.5 18 10.2 18 12.5V17H15.5V12.5C15.5 11.7 14.8 11.2 14 11.2C13.2 11.2 12.5 11.7 12.5 12.5V17H10V9.5H12.2V10.5C12.5 9.9 13.2 9.5 14 9.5H15.5Z" fill="#FFFFFF"/>
+        </svg>
+      );
+    case 'facebook':
+      return (
+        <svg style={styles} viewBox="0 0 24 24" fill="none">
+          <rect width="24" height="24" rx="6" fill="#1877F2" />
+          <path d="M14.5 9.5H16V7H14.5C13.1 7 12 8.1 12 9.5V10H10V12.5H12V17H14.5V12.5H16.5L17 10H14.5V9.5Z" fill="#FFFFFF"/>
+        </svg>
+      );
+    default: return null;
+  }
 };
 
-const platformTone: Record<Platform, PlatformTone> = {
-  instagram: {
-    accent: "#e1306c",
-    ink: "#8a1746",
-    soft: "#fff3f8",
-    ring: "#f8b8d2"
-  },
-  x: {
-    accent: "#111111",
-    ink: "#111111",
-    soft: "#f3f4f6",
-    ring: "#cfd3d8"
-  },
-  linkedin: {
-    accent: "#0a66c2",
-    ink: "#064579",
-    soft: "#eff7ff",
-    ring: "#b8daf8"
-  },
-  facebook: {
-    accent: "#1877f2",
-    ink: "#0d4fa6",
-    soft: "#f1f6ff",
-    ring: "#bdd6ff"
-  },
-  youtube: {
-    accent: "#ff0033",
-    ink: "#a10020",
-    soft: "#fff2f4",
-    ring: "#ffb9c5"
-  }
+const platformColor: Record<Platform, string> = {
+  youtube: '#FF0000',
+  x: '#000000',
+  instagram: '#E1306C',
+  linkedin: '#0A66C2',
+  facebook: '#1877F2'
 };
 
 export default function App() {
   const [uploads, setUploads] = useState<PlatformUpload[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busyPlatform, setBusyPlatform] = useState<Platform | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [selectedPlatform, setSelectedPlatform] = useState<Platform>("youtube");
 
   const refresh = useCallback(async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      setUploads(await api.uploads());
-    } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "Dashboard could not load.");
-    } finally {
-      setLoading(false);
-    }
+    setError(null); setLoading(true);
+    try { setUploads(await api.uploads()); } 
+    catch (e) { setError(e instanceof Error ? e.message : "Failed."); }
+    finally { setLoading(false); }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
 
-  const uploadsByPlatform = useMemo(() => {
-    return Object.fromEntries(
-      platforms.map((platform) => [platform, uploads.filter((upload) => upload.platform === platform)])
-    ) as Record<Platform, PlatformUpload[]>;
+  const stats = useMemo(() => ({
+    total: uploads.length,
+    queued: uploads.filter(u => u.status === "queued").length,
+    posted: uploads.filter(u => u.status === "posted").length,
+    failed: uploads.filter(u => u.status === "failed").length,
+  }), [uploads]);
+
+  const successRate = stats.total ? Math.round((stats.posted / stats.total) * 100) : 0;
+
+  const distData = useMemo(() => {
+    const counts: Record<string, number> = {};
+    platforms.forEach(p => counts[p] = 0);
+    uploads.forEach(u => counts[u.platform] = (counts[u.platform] || 0) + 1);
+    return platforms.map(p => ({ name: platformLabels[p], value: counts[p] || 0, color: platformColor[p] }))
+      .filter(d => d.value > 0);
   }, [uploads]);
 
-  const counts = useMemo(
-    () => ({
-      total: uploads.length,
-      ready: uploads.filter((upload) => upload.status === "queued").length,
-      processing: uploads.filter((upload) => upload.status === "processing").length,
-      posted: uploads.filter((upload) => upload.status === "posted").length,
-      failed: uploads.filter((upload) => upload.status === "failed").length
-    }),
-    [uploads]
-  );
-
-  const readiness = counts.total ? Math.round((counts.ready / counts.total) * 100) : 0;
-  const recentUploads = uploads.slice(0, 4);
-
-  async function handleUpload(platform: Platform, fileList: FileList | null) {
-    if (!fileList?.length) return;
-
-    setBusyPlatform(platform);
-    setError(null);
-
-    try {
-      await Promise.all(Array.from(fileList).map((file) => api.uploadToPlatform(platform, file)));
-      await refresh();
-    } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Upload failed.");
-    } finally {
-      setBusyPlatform(null);
+  const activityData = useMemo(() => {
+    const days: Record<string, number> = {};
+    const now = new Date();
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(now); d.setDate(d.getDate() - i);
+      const key = d.toISOString().split('T')[0];
+      days[key] = 0;
     }
-  }
+    uploads.forEach(u => {
+      const date = new Date(u.uploadedAt).toISOString().split('T')[0];
+      if (days[date] !== undefined) days[date] = (days[date] || 0) + 1;
+    });
+    return Object.entries(days).map(([date, count]) => ({
+      day: new Date(date).toLocaleDateString('en-US', { weekday: 'short' }),
+      posts: count
+    }));
+  }, [uploads]);
 
-  async function deleteUpload(id: string) {
-    setError(null);
-    const previousUploads = uploads;
-    setUploads((current) => current.filter((upload) => upload.id !== id));
+  const handleRun = async () => {
+    setIsRunning(true);
+    try { await api.runAutomation(); alert("Automation started."); setTimeout(refresh, 5000); } 
+    catch (e) { alert("Error: " + (e instanceof Error ? e.message : "Unknown")); }
+    setIsRunning(false);
+  };
 
-    try {
-      await api.deleteUpload(id);
-      await refresh();
-    } catch (deleteError) {
-      setUploads(previousUploads);
-      setError(deleteError instanceof Error ? deleteError.message : "Could not remove file.");
-    }
-  }
+  const openModal = (platform: Platform) => { setSelectedPlatform(platform); setShowModal(true); };
 
   return (
-    <main className="workspace">
-      <section className="monitor-shell">
-        <header className="monitor-header">
-          <div>
-            <span className="brand-name">Tinitiate Autobot</span>
-            <h1>Automation Monitor</h1>
+    <div className="app-container">
+      <header className="top-header">
+        <div className="header-left" style={{ display: 'flex', alignItems: 'center', gap: '32px' }}>
+          <div className="brand">Tinitiate<span>Autobot</span></div>
+          <div className="header-stats">
+            <span><span className="dot green"></span>{stats.posted}</span>
+            <span><span className="dot yellow"></span>{stats.queued}</span>
+            <span><span className="dot red"></span>{stats.failed}</span>
           </div>
-          <span className={`system-pill ${loading ? "syncing" : ""}`}>{loading ? "Syncing" : "Intake Online"}</span>
-        </header>
-
-        <section className="monitor-grid" aria-label="Queue monitoring">
-          <article className="monitor-card readiness-card">
-            <div className="readiness-ring" style={{ "--progress": `${readiness * 3.6}deg` } as CSSProperties}>
-              <div>
-                <strong>{readiness}%</strong>
-                <span>Ready</span>
-              </div>
-            </div>
-            <div className="readiness-copy">
-              <span>Queue Readiness</span>
-              <strong>
-                {counts.ready} of {counts.total}
-              </strong>
-              <p>{counts.total === 0 ? "Waiting for uploads" : "Files prepared for the automation handoff"}</p>
-            </div>
-          </article>
-
-          <article className="monitor-card status-card">
-            <div className="card-title">
-              <span>Status Distribution</span>
-              <strong>{counts.total} files</strong>
-            </div>
-            <StatusRow label="Ready" tone="ready" total={counts.total} value={counts.ready} />
-            <StatusRow label="Working" tone="working" total={counts.total} value={counts.processing} />
-            <StatusRow label="Posted" tone="posted" total={counts.total} value={counts.posted} />
-            <StatusRow label="Failed" tone="failed" total={counts.total} value={counts.failed} />
-          </article>
-
-          <article className="monitor-card handoff-card">
-            <div className="card-title">
-              <span>Automation Handoff</span>
-              <strong>n8n ready</strong>
-            </div>
-            <code>/api/automation/input</code>
-            <div className="handoff-meta">
-              <div>
-                <span>Store</span>
-                <strong>data/store.json</strong>
-              </div>
-              <div>
-                <span>Files</span>
-                <strong>uploads/</strong>
-              </div>
-            </div>
-          </article>
-
-          <article className="monitor-card activity-card">
-            <div className="card-title">
-              <span>Recent Intake</span>
-              <strong>{recentUploads.length || "None"}</strong>
-            </div>
-            {recentUploads.length === 0 ? (
-              <div className="empty-activity">No files in the queue yet.</div>
-            ) : (
-              <div className="activity-list">
-                {recentUploads.map((upload) => (
-                  <div className="activity-item" key={upload.id}>
-                    <span className={`activity-dot activity-${upload.status}`} />
-                    <div>
-                      <strong>{upload.originalName}</strong>
-                      <span>
-                        {platformLabels[upload.platform]} - {upload.status}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </article>
-        </section>
-      </section>
-
-      {error && <div className="notice error">{error}</div>}
-
-      <section className="upload-board" aria-busy={loading}>
-        {platforms.map((platform) => (
-          <PlatformCard
-            busy={busyPlatform === platform}
-            key={platform}
-            onDelete={deleteUpload}
-            onUpload={handleUpload}
-            platform={platform}
-            uploads={uploadsByPlatform[platform]}
-          />
-        ))}
-      </section>
-    </main>
-  );
-}
-
-function StatusRow({ label, tone, total, value }: { label: string; tone: string; total: number; value: number }) {
-  const width = `${total ? Math.max((value / total) * 100, value ? 6 : 0) : 0}%`;
-
-  return (
-    <div className="status-row">
-      <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
-      </div>
-      <div className="status-track">
-        <div className={`status-fill status-${tone}`} style={{ width }} />
-      </div>
-    </div>
-  );
-}
-
-type PlatformCardProps = {
-  platform: Platform;
-  uploads: PlatformUpload[];
-  busy: boolean;
-  onUpload: (platform: Platform, files: FileList | null) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
-};
-
-function PlatformCard({ platform, uploads, busy, onUpload, onDelete }: PlatformCardProps) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const tone = platformTone[platform];
-  const queued = uploads.filter((upload) => upload.status === "queued").length;
-  const latest = uploads[0] ? formatDate(uploads[0].uploadedAt) : "Empty queue";
-
-  function openPicker() {
-    inputRef.current?.click();
-  }
-
-  return (
-    <article
-      className={`platform-card ${dragging ? "dragging" : ""}`}
-      onDragEnter={(event) => {
-        event.preventDefault();
-        setDragging(true);
-      }}
-      onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          setDragging(false);
-        }
-      }}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
-        event.preventDefault();
-        setDragging(false);
-        void onUpload(platform, event.dataTransfer.files);
-      }}
-      style={
-        {
-          "--platform-accent": tone.accent,
-          "--platform-ink": tone.ink,
-          "--platform-soft": tone.soft,
-          "--platform-ring": tone.ring
-        } as CSSProperties
-      }
-    >
-      <input
-        hidden
-        multiple
-        onChange={(event) => {
-          const files = event.currentTarget.files;
-          void onUpload(platform, files).finally(() => {
-            event.currentTarget.value = "";
-          });
-        }}
-        ref={inputRef}
-        type="file"
-      />
-
-      <header className="platform-head">
-        <BrandLogo platform={platform} />
-        <div>
-          <h2>{platformLabels[platform]}</h2>
-          <span>{latest}</span>
         </div>
-        <div className="queued-number">
-          <strong>{queued}</strong>
-          <span>ready</span>
+        <div className="header-right">
+          <button className="btn-run" onClick={handleRun} disabled={isRunning}>
+            {isRunning ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
+            {isRunning ? "Running..." : "Run Automation"}
+          </button>
+          <button className="btn-icon" onClick={refresh}><RefreshCw size={18} className={loading ? "spin" : ""} /></button>
         </div>
       </header>
 
-      <button className={`upload-zone ${uploads.length > 0 ? "compact" : ""}`} disabled={busy} onClick={openPicker} type="button">
-        <span className="upload-symbol">
-          {busy ? <Loader2 className="spin" size={22} aria-hidden="true" /> : <Upload size={22} aria-hidden="true" />}
-        </span>
-        <span>
-          <strong>{busy ? "Uploading" : "Add file"}</strong>
-          <small>{uploads.length === 0 ? "Queue is empty" : `${uploads.length} file${uploads.length === 1 ? "" : "s"} loaded`}</small>
-        </span>
-      </button>
-
-      {uploads.length > 0 && (
-        <div className="upload-list">
-          {uploads.map((upload) => (
-            <UploadRow key={upload.id} onDelete={onDelete} upload={upload} />
-          ))}
-        </div>
-      )}
-
-      {dragging && (
-        <div className="drop-overlay">
-          <Upload size={28} aria-hidden="true" />
-          <strong>Release to upload</strong>
-        </div>
-      )}
-    </article>
-  );
-}
-
-function UploadRow({ upload, onDelete }: { upload: PlatformUpload; onDelete: (id: string) => Promise<void> }) {
-  return (
-    <div className="upload-row">
-      <FileThumb upload={upload} />
-      <div className="upload-copy">
-        <strong title={upload.originalName}>{upload.originalName}</strong>
-        <span>
-          {upload.extension.toUpperCase()} - {formatBytes(upload.size)} - {formatDate(upload.uploadedAt)}
-        </span>
+      <div className="kpi-grid">
+        <div className="kpi"><span>Total</span><strong>{stats.total}</strong></div>
+        <div className="kpi"><span>Queued</span><strong>{stats.queued}</strong></div>
+        <div className="kpi"><span>Posted</span><strong>{stats.posted}</strong></div>
+        <div className="kpi"><span>Failed</span><strong>{stats.failed}</strong></div>
+        <div className="kpi success"><span>Success Rate</span><strong>{successRate}% <TrendingUp size={18} /></strong></div>
       </div>
-      <span className={`queue-state state-${upload.status}`}>{upload.status}</span>
-      <button className="delete-button" onClick={() => void onDelete(upload.id)} title="Remove file" type="button">
-        <Trash2 size={15} aria-hidden="true" />
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <section className="platform-hero">
+        {platforms.map(p => {
+          const items = uploads.filter(u => u.platform === p);
+          const q = items.filter(u => u.status === "queued").length;
+          const po = items.filter(u => u.status === "posted").length;
+          const f = items.filter(u => u.status === "failed").length;
+          const prog = items.length ? Math.round((po / items.length) * 100) : 0;
+          
+          const radius = 22;
+          const circumference = 2 * Math.PI * radius;
+          const offset = circumference - (prog / 100) * circumference;
+
+          return (
+            <div 
+              key={p} 
+              className="platform-card-premium" 
+              data-platform={p}
+              onClick={() => openModal(p)}
+            >
+              <div className="card-head">
+                <div className="platform-icon-svg"><CustomIcon platform={p} size={28} /></div>
+                <span className="p-name">{platformLabels[p]}</span>
+                <span className="p-count">{items.length}</span>
+              </div>
+              
+              <div className="p-progress-ring">
+                <svg className="progress-ring-svg" viewBox="0 0 56 56">
+                  <circle className="progress-ring-bg" cx="28" cy="28" r={radius} />
+                  <circle 
+                    className="progress-ring-fg" 
+                    cx="28" cy="28" r={radius} 
+                    stroke={platformColor[p]}
+                    strokeDasharray={circumference} 
+                    strokeDashoffset={offset} 
+                  />
+                </svg>
+                <span className="ring-label">{prog}%</span>
+              </div>
+
+              <div className="p-stats">
+                <span><span className="dot q"></span>{q} Queue</span>
+                <span><span className="dot p"></span>{po} Posted</span>
+                <span><span className="dot f"></span>{f} Failed</span>
+              </div>
+
+              <div className="p-upload-zone">
+                <Upload size={16} /> Upload to {platformLabels[p]}
+              </div>
+            </div>
+          );
+        })}
+      </section>
+
+      <section className="charts-section">
+        <div className="charts-grid">
+          <div className="chart-box">
+            <div className="chart-label">Platform Distribution</div>
+            <div className="chart-wrap">
+              {distData.length === 0 ? <div className="empty-state">Upload content to populate</div> : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={distData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={2} dataKey="value">
+                      {distData.map((d, i) => <Cell key={i} fill={d.color} stroke="#FFFFFF" strokeWidth={2} />)}
+                    </Pie>
+                    <Tooltip contentStyle={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+          <div className="chart-box">
+            <div className="chart-label">7-Day Activity</div>
+            <div className="chart-wrap">
+              {activityData.every(d => d.posts === 0) ? <div className="empty-state">No posts in last 7 days</div> : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={activityData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
+                    <XAxis dataKey="day" stroke="#94A3B8" fontSize={12} />
+                    <YAxis stroke="#94A3B8" fontSize={12} allowDecimals={false} />
+                    <Tooltip contentStyle={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '8px' }} />
+                    <Bar dataKey="posts" fill="#4F46E5" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="feed-section">
+        <div className="feed-header"><span>Recent Activity</span><span>{uploads.length} events</span></div>
+        <div className="feed-list">
+          {uploads.length === 0 ? <div className="empty-state" style={{ padding: '20px' }}>No activity yet</div> : 
+            uploads.slice(0, 8).map(u => <FeedItem key={u.id} upload={u} onRefresh={refresh} />)
+          }
+        </div>
+      </section>
+
+      {showModal && <CreateModal platform={selectedPlatform} onClose={() => setShowModal(false)} onSuccess={refresh} />}
+    </div>
+  );
+}
+
+function FeedItem({ upload, onRefresh }: { upload: PlatformUpload; onRefresh: () => void }) {
+  const [deleting, setDeleting] = useState(false);
+  const time = new Date(upload.uploadedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+  return (
+    <div className="feed-item">
+      <div className="feed-icon" style={{ background: platformColor[upload.platform] + '15', borderColor: platformColor[upload.platform] + '40' }}>
+        <CustomIcon platform={upload.platform} size={18} />
+      </div>
+      <div className="feed-info">
+        <span className="feed-name">{upload.originalName.slice(0, 30)}</span>
+        <span className="feed-meta">{time} · {(upload as any).caption || 'No caption'}</span>
+      </div>
+      <span className={`badge badge-${upload.status}`}><span className="dot"></span>{upload.status}</span>
+      <button className="feed-del" onClick={async () => { if(confirm('Delete?')) { setDeleting(true); await api.deleteUpload(upload.id); onRefresh(); setDeleting(false); } }} disabled={deleting}>
+        {deleting ? <Loader2 className="spin" size={14} /> : <Trash2 size={14} />}
       </button>
     </div>
   );
 }
 
-function FileThumb({ upload }: { upload: PlatformUpload }) {
-  if (upload.mimeType.startsWith("image/")) {
-    return <img className="file-thumb" src={assetUrl(upload.url)} alt="" />;
-  }
+// --- CREATE MODAL (UPDATED WITH TITLE) ---
+function CreateModal({ platform, onClose, onSuccess }: { platform: Platform; onClose: () => void; onSuccess: () => void }) {
+  const [p, setP] = useState<Platform>(platform);
+  const [file, setFile] = useState<File | null>(null);
+  const [title, setTitle] = useState(""); // 👈 NEW TITLE STATE
+  const [caption, setCaption] = useState("");
+  const [schedule, setSchedule] = useState("");
+  const [loading, setLoading] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  const isYouTube = p === "youtube";
+  const isLinkedIn = p === "linkedin";
 
-  if (upload.mimeType.startsWith("video/")) {
-    return (
-      <video className="file-thumb" muted preload="metadata">
-        <source src={assetUrl(upload.url)} type={upload.mimeType} />
-      </video>
-    );
-  }
+  const submit = async () => {
+    if (!file) return alert("Select a file");
+    if (isYouTube && !title.trim()) return alert("Video Title is required");
+    if (!caption.trim()) return alert(isLinkedIn ? "Write LinkedIn post text" : "Write a caption");
+    setLoading(true);
+    try { 
+      await api.uploadToPlatform(p, file, isYouTube ? title.trim() : "", caption.trim(), schedule || undefined); 
+      onSuccess(); 
+      onClose(); 
+    } catch (e) { alert("Error: " + (e instanceof Error ? e.message : "Unknown")); }
+    setLoading(false);
+  };
 
-  const Icon = upload.extension === "zip" || upload.extension === "rar" ? FileArchive : FileText;
   return (
-    <div className="file-thumb file-thumb-generic">
-      <Icon size={22} aria-hidden="true" />
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-panel" onClick={e => e.stopPropagation()}>
+        <div className="modal-head"><span>New Post</span><button onClick={onClose}><X size={22} /></button></div>
+        <div className="modal-body">
+          <div className="field"><label>Platform</label>
+            <div className="chip-group">
+              {platforms.map(pl => {
+                const color = platformColor[pl];
+                return <button key={pl} className={`chip ${pl === p ? 'active' : ''}`} onClick={() => setP(pl)} style={pl === p ? { borderColor: color, color: color } : {}}>{platformLabels[pl]}</button>
+              })}
+            </div>
+          </div>
+          <div className="field"><label>File</label>
+            <div className="drop" onClick={() => ref.current?.click()} onDrop={e => { e.preventDefault(); setFile(e.dataTransfer.files[0]); }}>
+              <input type="file" hidden ref={ref} onChange={e => setFile(e.target.files?.[0] || null)} />
+              {file ? <div className="file-preview"><FileText size={20} /> {file.name} <button onClick={e => { e.stopPropagation(); setFile(null); }}>Remove</button></div> : <><Upload size={24} /> Click or drag file here</>}
+            </div>
+          </div>
+          {/* 👇 NEW TITLE FIELD */}
+          {isYouTube && (
+            <div className="field">
+              <label>Video Title <span style={{color: '#EF4444'}}>*</span></label>
+              <input 
+                type="text" 
+                value={title} 
+                onChange={e => setTitle(e.target.value)} 
+                placeholder="Enter video title..." 
+              />
+            </div>
+          )}
+          <div className="field">
+            <label>
+              {isYouTube ? "Description" : isLinkedIn ? "LinkedIn Post Text" : "Caption"}
+              <span style={{color: '#EF4444'}}> *</span>
+            </label>
+            <textarea
+              rows={isLinkedIn ? 5 : 3}
+              value={caption}
+              onChange={e => setCaption(e.target.value)}
+              placeholder={isLinkedIn ? "What do you want to talk about?" : "Write your post description..."}
+            />
+          </div>
+          <div className="field"><label>Schedule (optional)</label><input type="datetime-local" value={schedule} onChange={e => setSchedule(e.target.value)} /></div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn-outline" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={submit} disabled={loading}>{loading ? <Loader2 className="spin" size={18} /> : "Publish"}</button>
+        </div>
+      </div>
     </div>
   );
-}
-
-function BrandLogo({ platform }: { platform: Platform }) {
-  if (platform === "instagram") {
-    return (
-      <svg className="brand-logo" viewBox="0 0 48 48" aria-hidden="true">
-        <defs>
-          <linearGradient id="instagramGradient" x1="6" x2="42" y1="42" y2="6">
-            <stop offset="0" stopColor="#feda75" />
-            <stop offset="0.28" stopColor="#fa7e1e" />
-            <stop offset="0.52" stopColor="#d62976" />
-            <stop offset="0.74" stopColor="#962fbf" />
-            <stop offset="1" stopColor="#4f5bd5" />
-          </linearGradient>
-        </defs>
-        <rect width="48" height="48" rx="13" fill="url(#instagramGradient)" />
-        <rect x="13" y="13" width="22" height="22" rx="7" fill="none" stroke="#fff" strokeWidth="3" />
-        <circle cx="24" cy="24" r="5.5" fill="none" stroke="#fff" strokeWidth="3" />
-        <circle cx="31.8" cy="16.6" r="2.1" fill="#fff" />
-      </svg>
-    );
-  }
-
-  if (platform === "x") {
-    return (
-      <svg className="brand-logo brand-logo-x" viewBox="0 0 48 48" aria-hidden="true">
-        <rect width="48" height="48" rx="12" fill="#111111" />
-        <path
-          d="M29.1 21.6 40.2 8.8h-5.3L26.7 18.2 20.1 8.8H8.5l11.8 16.9L8.5 39.2h5.3l8.9-10.2 7.1 10.2h11.6L29.1 21.6Zm-3.2 3.7-2-2.8-8.6-12.1h2.4l6.9 9.7 2 2.8 9.1 12.8h-2.4l-7.4-10.4Z"
-          fill="#ffffff"
-        />
-      </svg>
-    );
-  }
-
-  if (platform === "linkedin") {
-    return (
-      <svg className="brand-logo" viewBox="0 0 48 48" aria-hidden="true">
-        <rect width="48" height="48" rx="8" fill="#0a66c2" />
-        <circle cx="15" cy="15" r="4" fill="#ffffff" />
-        <rect x="11.5" y="21" width="7" height="17" fill="#ffffff" />
-        <path d="M23 21h6.7v2.5c1-1.7 2.9-3 5.9-3 5 0 7.4 3.1 7.4 8.7V38h-7v-8c0-2.5-.9-3.8-2.9-3.8-2.2 0-3.1 1.5-3.1 3.8v8h-7V21Z" fill="#ffffff" />
-      </svg>
-    );
-  }
-
-  if (platform === "facebook") {
-    return (
-      <svg className="brand-logo" viewBox="0 0 48 48" aria-hidden="true">
-        <rect width="48" height="48" rx="13" fill="#1877f2" />
-        <path
-          d="M29.8 15.9h4.1V9.3c-.7-.1-3.1-.3-5.9-.3-5.8 0-9.8 3.5-9.8 10v5.7h-6.5v7.4h6.5V48h7.8V32.1h6.4l1-7.4H26v-4.9c0-2.1.6-3.9 3.8-3.9Z"
-          fill="#ffffff"
-        />
-      </svg>
-    );
-  }
-
-  return (
-    <svg className="brand-logo" viewBox="0 0 48 48" aria-hidden="true">
-      <rect width="48" height="48" rx="11" fill="#ff0033" />
-      <path d="M20 15.5 34 24 20 32.5v-17Z" fill="#ffffff" />
-    </svg>
-  );
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
-
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(new Date(value));
 }

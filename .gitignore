@@ -3,5 +3,6 @@ dist
 .env
 *.log
 data/store.json
+browser-data/
 uploads/*
 !uploads/.gitkeep

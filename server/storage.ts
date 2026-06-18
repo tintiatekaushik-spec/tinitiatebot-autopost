@@ -25,6 +25,9 @@ type StoredFileInput = {
   mimeType: string;
   size: number;
   url: string;
+  title?: string;      // 👈 NEW
+  caption: string;
+  scheduledAt?: string;
 };
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -135,9 +138,12 @@ export async function createUpload(platform: Platform, file: StoredFileInput) {
     extension,
     size: file.size,
     url: file.url,
+    title: file.title || file.caption, // 👈 Use title if provided, else fallback to caption
+    caption: file.caption,
     status: "queued",
     uploadedAt: timestamp,
     updatedAt: timestamp,
+    scheduledAt: file.scheduledAt || undefined,
     automation: createAutomation(platform, id, file.url)
   };
 
