@@ -1,15 +1,20 @@
 import { chromium } from "playwright";
 import { automationInput, updateUploadStatus } from "../storage.js";
+import { postToFacebook } from "./publishers/facebook.js";
 import { postToInstagram } from "./publishers/instagram.js";
 import { postToLinkedIn } from "./publishers/linkedin.js";
 import { postToYouTube } from "./publishers/youtube.js";
+import { postToX } from "./publishers/x.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const userDataDir = path.resolve(__dirname, "../../browser-data");
+const rootDir = path.resolve(__dirname, "../..");
+const userDataDir = path.join(rootDir, "browser-data");
+const facebookUserDataDir = resolveProfilePath(process.env.FACEBOOK_USER_DATA_DIR, "facebook-browser-data");
+const xUserDataDir = resolveProfilePath(process.env.X_USER_DATA_DIR, "x-browser-data");
 
 const disabledChromeFeatures = [
   "IsolateOrigins",
@@ -37,8 +42,13 @@ function writeJsonFile(filePath: string, data: Record<string, any>) {
   fs.writeFileSync(filePath, JSON.stringify(data));
 }
 
-function prepareChromeProfile() {
-  const preferencesPath = path.join(userDataDir, "Default", "Preferences");
+function resolveProfilePath(envPath: string | undefined, fallbackFolder: string) {
+  if (!envPath?.trim()) return path.join(rootDir, fallbackFolder);
+  return path.isAbsolute(envPath) ? envPath : path.resolve(rootDir, envPath);
+}
+
+function prepareChromeProfile(profileDir = userDataDir) {
+  const preferencesPath = path.join(profileDir, "Default", "Preferences");
   const preferences = readJsonFile(preferencesPath);
 
   preferences.browser = {
@@ -64,19 +74,20 @@ function prepareChromeProfile() {
   writeJsonFile(preferencesPath, preferences);
 }
 
-export async function runAutomation() {
-  console.log("Starting publisher automation...");
-  const { channels } = await automationInput();
+function getFailureHoldMs() {
+  return Number(process.env.AUTOMATION_FAILURE_HOLD_MS ?? 0);
+}
 
-  const youtubeUploads = channels.youtube || [];
-  const linkedinUploads = channels.linkedin || [];
-  const instagramUploads = channels.instagram || [];
+async function holdOnFailureIfConfigured(hadFailure: boolean) {
+  const failureHoldMs = getFailureHoldMs();
 
-  if (youtubeUploads.length === 0 && linkedinUploads.length === 0 && instagramUploads.length === 0) {
-    console.log("No queued uploads for YouTube, LinkedIn, or Instagram.");
-    return;
+  if (hadFailure && failureHoldMs > 0) {
+    console.log(`Automation failed. Keeping Chrome open for ${failureHoldMs / 1000} seconds so you can inspect the screen...`);
+    await new Promise((resolve) => setTimeout(resolve, failureHoldMs));
   }
+}
 
+async function runSharedBrowserApps(youtubeUploads: any[], linkedinUploads: any[], instagramUploads: any[]) {
   prepareChromeProfile();
   const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
 
@@ -149,11 +160,128 @@ export async function runAutomation() {
       }
     }
   } finally {
-    if (hadFailure) {
-      console.log("Automation failed. Keeping Chrome open for 20 seconds so you can inspect the screen...");
-      await new Promise((resolve) => setTimeout(resolve, 20000));
-    }
-
+    await holdOnFailureIfConfigured(hadFailure);
     await browser.close();
+  }
+}
+
+async function runFacebookApps(facebookUploads: any[]) {
+  prepareChromeProfile(facebookUserDataDir);
+  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
+
+  console.log(`Using dedicated Facebook Chrome profile: ${facebookUserDataDir}`);
+
+  const browser = await chromium.launchPersistentContext(facebookUserDataDir, {
+    headless: false,
+    channel: "chrome",
+    slowMo: slowMoMs,
+    viewport: null,
+    args: [
+      "--disable-notifications",
+      "--deny-permission-prompts",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
+  });
+
+  let hadFailure = false;
+
+  try {
+    const page = await browser.newPage();
+
+    for (const upload of facebookUploads) {
+      await updateUploadStatus(upload.id, "processing");
+
+      try {
+        await postToFacebook(page, upload);
+        await updateUploadStatus(upload.id, "posted");
+        console.log(`Posted ${upload.id} to Facebook.`);
+      } catch (error: any) {
+        hadFailure = true;
+        await updateUploadStatus(upload.id, "failed");
+        console.error(`Failed ${upload.id} on Facebook: ${error.message}`);
+      }
+    }
+  } finally {
+    await holdOnFailureIfConfigured(hadFailure);
+    await browser.close();
+  }
+}
+
+async function runXApps(xUploads: any[]) {
+  prepareChromeProfile(xUserDataDir);
+  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
+
+  console.log(`Using dedicated X Chrome profile: ${xUserDataDir}`);
+
+  const browser = await chromium.launchPersistentContext(xUserDataDir, {
+    headless: false,
+    channel: "chrome",
+    slowMo: slowMoMs,
+    viewport: null,
+    args: [
+      "--disable-notifications",
+      "--deny-permission-prompts",
+      "--disable-blink-features=AutomationControlled",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
+  });
+
+  let hadFailure = false;
+
+  try {
+    const page = await browser.newPage();
+
+    for (const upload of xUploads) {
+      await updateUploadStatus(upload.id, "processing");
+
+      try {
+        await postToX(page, upload);
+        await updateUploadStatus(upload.id, "posted");
+        console.log(`Posted ${upload.id} to X.`);
+      } catch (error: any) {
+        hadFailure = true;
+        await updateUploadStatus(upload.id, "failed");
+        console.error(`Failed ${upload.id} on X: ${error.message}`);
+      }
+    }
+  } finally {
+    await holdOnFailureIfConfigured(hadFailure);
+    await browser.close();
+  }
+}
+
+export async function runAutomation() {
+  console.log("Starting publisher automation...");
+  const { channels } = await automationInput();
+
+  const youtubeUploads = channels.youtube || [];
+  const linkedinUploads = channels.linkedin || [];
+  const instagramUploads = channels.instagram || [];
+  const facebookUploads = channels.facebook || [];
+  const xUploads = channels.x || [];
+
+  if (
+    youtubeUploads.length === 0 &&
+    linkedinUploads.length === 0 &&
+    instagramUploads.length === 0 &&
+    facebookUploads.length === 0 &&
+    xUploads.length === 0
+  ) {
+    console.log("No queued uploads for YouTube, LinkedIn, Instagram, Facebook, or X.");
+    return;
+  }
+
+  if (youtubeUploads.length > 0 || linkedinUploads.length > 0 || instagramUploads.length > 0) {
+    await runSharedBrowserApps(youtubeUploads, linkedinUploads, instagramUploads);
+  }
+
+  if (facebookUploads.length > 0) {
+    await runFacebookApps(facebookUploads);
+  }
+
+  if (xUploads.length > 0) {
+    await runXApps(xUploads);
   }
 }
