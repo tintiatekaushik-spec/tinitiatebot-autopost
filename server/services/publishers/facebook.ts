@@ -593,9 +593,10 @@ export async function loginToFacebook(page: Page, _upload?: PlatformUpload, hold
     process.env.FB_USERNAME
   )?.trim();
   const password = (process.env.FACEBOOK_PASSWORD ?? process.env.FB_PASSWORD)?.trim();
-  const autoLogin = process.env.FACEBOOK_AUTO_LOGIN === "true";
+  const credentialsConfigured = Boolean(email && password);
+  const autoLogin = process.env.FACEBOOK_AUTO_LOGIN !== "false" && credentialsConfigured;
 
-  if (autoLogin && (!email || !password)) {
+  if (process.env.FACEBOOK_AUTO_LOGIN === "true" && !credentialsConfigured) {
     throw new Error("Missing FACEBOOK_EMAIL/FACEBOOK_USERNAME or FACEBOOK_PASSWORD in .env");
   }
 
