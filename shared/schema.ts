@@ -9,6 +9,23 @@ export const uploadStatusSchema = z.enum(uploadStatuses);
 export type Platform = (typeof platforms)[number];
 export type UploadStatus = (typeof uploadStatuses)[number];
 
+export const folderConnectionSchema = z.object({
+  id: z.string(),
+  platform: platformSchema,
+  folderPath: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastScannedAt: z.string().optional(),
+  lastError: z.string().optional()
+});
+
+export const folderSourceSchema = z.object({
+  connectionId: z.string(),
+  relativePath: z.string(),
+  fingerprint: z.string(),
+  present: z.boolean()
+});
+
 export const platformLabels: Record<Platform, string> = {
   instagram: "Instagram",
   x: "X",
@@ -59,7 +76,14 @@ export const platformUploadSchema = z.object({
   uploadedAt: z.string(),
   updatedAt: z.string(),
   scheduledAt: z.string().optional(),
+  folderSource: folderSourceSchema.optional(),
   automation: uploadAutomationSchema
+});
+
+export const updateUploadDetailsSchema = z.object({
+  title: z.string().trim().optional(),
+  caption: z.string().trim().min(1, "Caption is required"),
+  scheduledAt: z.string().nullable().optional()
 });
 
 export const updateUploadStatusSchema = z.object({
@@ -68,8 +92,10 @@ export const updateUploadStatusSchema = z.object({
 });
 
 export type PlatformUpload = z.infer<typeof platformUploadSchema>;
+export type FolderConnection = z.infer<typeof folderConnectionSchema>;
 export type UploadAutomation = z.infer<typeof uploadAutomationSchema>;
 export type UpdateUploadStatusInput = z.input<typeof updateUploadStatusSchema>;
+export type UpdateUploadDetailsInput = z.input<typeof updateUploadDetailsSchema>;
 
 export type DashboardSummary = {
   totalUploads: number;

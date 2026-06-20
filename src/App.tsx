@@ -1,12 +1,11 @@
-import { 
-  BarChart3, Clock, CheckCircle2, AlertCircle, 
-  Loader2, Play, RefreshCw, Upload, X, 
-  FileText, Trash2, TrendingUp
+import {
+  Clock, Loader2, Play, RefreshCw, X,
+  CalendarClock, FileText, FolderSync, Pencil, Trash2, TrendingUp, Unplug
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, useRef } from "react";
-import type { Platform, PlatformUpload } from "../shared/schema";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FolderConnection, Platform, PlatformUpload } from "../shared/schema";
 import { platformLabels, platforms } from "../shared/schema";
-import { api, assetUrl } from "./lib/api";
+import { api } from "./lib/api";
 import {
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, 
   Tooltip, ResponsiveContainer, CartesianGrid
@@ -82,15 +81,20 @@ function toLocalDateTimeInputValue(date: Date) {
 
 export default function App() {
   const [uploads, setUploads] = useState<PlatformUpload[]>([]);
+  const [folderConnections, setFolderConnections] = useState<FolderConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [showModal, setShowModal] = useState(false);
-  const [selectedPlatform, setSelectedPlatform] = useState<Platform>("youtube");
+  const [folderPlatform, setFolderPlatform] = useState<Platform | null>(null);
+  const [editingUpload, setEditingUpload] = useState<PlatformUpload | null>(null);
 
   const refresh = useCallback(async (showLoading = true) => {
     setError(null); if (showLoading) setLoading(true);
-    try { setUploads(await api.uploads()); } 
+    try {
+      const [latestUploads, latestConnections] = await Promise.all([api.uploads(), api.folderConnections()]);
+      setUploads(latestUploads);
+      setFolderConnections(latestConnections);
+    }
     catch (e) { setError(e instanceof Error ? e.message : "Failed."); }
     finally { if (showLoading) setLoading(false); }
   }, []);
@@ -143,8 +147,6 @@ export default function App() {
     setIsRunning(false);
   };
 
-  const openModal = (platform: Platform) => { setSelectedPlatform(platform); setShowModal(true); };
-
   return (
     <div className="app-container">
       <header className="top-header">
@@ -178,6 +180,8 @@ export default function App() {
       <section className="platform-hero">
         {platforms.map(p => {
           const items = uploads.filter(u => u.platform === p);
+          const folderConnection = folderConnections.find(connection => connection.platform === p);
+          const folderItems = items.filter(item => item.folderSource?.present);
           const q = items.filter(u => u.status === "queued").length;
           const po = items.filter(u => u.status === "posted").length;
           const f = items.filter(u => u.status === "failed").length;
@@ -192,7 +196,7 @@ export default function App() {
               key={p} 
               className="platform-card-premium" 
               data-platform={p}
-              onClick={() => openModal(p)}
+              onClick={() => setFolderPlatform(p)}
             >
               <div className="card-head">
                 <div className="platform-icon-svg"><CustomIcon platform={p} size={28} /></div>
@@ -220,8 +224,18 @@ export default function App() {
                 <span><span className="dot f"></span>{f} Failed</span>
               </div>
 
-              <div className="p-upload-zone">
-                <Upload size={16} /> Upload to {platformLabels[p]}
+              <div className="p-actions">
+                <button
+                  type="button"
+                  className={`p-folder-zone ${folderConnection ? "connected" : ""}`}
+                  title={folderConnection?.folderPath ?? `Connect ${platformLabels[p]} folder`}
+                  onClick={event => {
+                    event.stopPropagation();
+                    setFolderPlatform(p);
+                  }}
+                >
+                  <FolderSync size={15} /> {folderConnection ? `Open folder (${folderItems.length})` : "Connect folder"}
+                </button>
               </div>
             </div>
           );
@@ -268,17 +282,37 @@ export default function App() {
         <div className="feed-header"><span>Recent Activity</span><span>{uploads.length} events</span></div>
         <div className="feed-list">
           {uploads.length === 0 ? <div className="empty-state" style={{ padding: '20px' }}>No activity yet</div> : 
-            uploads.slice(0, 8).map(u => <FeedItem key={u.id} upload={u} onRefresh={refresh} />)
+            uploads.map(u => <FeedItem key={u.id} upload={u} onRefresh={refresh} onEdit={setEditingUpload} />)
           }
         </div>
       </section>
 
-      {showModal && <CreateModal platform={selectedPlatform} onClose={() => setShowModal(false)} onSuccess={refresh} />}
+      {folderPlatform && (
+        <FolderConnectionModal
+          platform={folderPlatform}
+          connection={folderConnections.find(item => item.platform === folderPlatform)}
+          uploads={uploads.filter(item => item.platform === folderPlatform && item.folderSource?.present)}
+          onEdit={setEditingUpload}
+          onClose={() => setFolderPlatform(null)}
+          onSuccess={refresh}
+        />
+      )}
+      {editingUpload && (
+        <EditPostModal upload={editingUpload} onClose={() => setEditingUpload(null)} onSuccess={refresh} />
+      )}
     </div>
   );
 }
 
-function FeedItem({ upload, onRefresh }: { upload: PlatformUpload; onRefresh: () => void }) {
+function FeedItem({
+  upload,
+  onRefresh,
+  onEdit,
+}: {
+  upload: PlatformUpload;
+  onRefresh: () => void;
+  onEdit: (upload: PlatformUpload) => void;
+}) {
   const [deleting, setDeleting] = useState(false);
   const time = new Date(upload.uploadedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const scheduledTime = upload.scheduledAt
@@ -294,103 +328,194 @@ function FeedItem({ upload, onRefresh }: { upload: PlatformUpload; onRefresh: ()
         <span className="feed-name">{upload.originalName.slice(0, 30)}</span>
         <span className="feed-meta">
           {scheduledTime && <Clock size={12} />}
-          {scheduledTime ? `Scheduled ${scheduledTime}` : time} · {upload.caption || 'No caption'}
+          {scheduledTime ? `Scheduled ${scheduledTime}` : upload.folderSource ? "Needs schedule" : time} · {upload.caption || 'No caption'}
         </span>
       </div>
       <span className={`badge badge-${upload.status}`}><span className="dot"></span>{upload.status}</span>
-      <button className="feed-del" onClick={async () => { if(confirm('Delete?')) { setDeleting(true); await api.deleteUpload(upload.id); onRefresh(); setDeleting(false); } }} disabled={deleting}>
-        {deleting ? <Loader2 className="spin" size={14} /> : <Trash2 size={14} />}
-      </button>
+      {(upload.status === "queued" || upload.status === "failed") && (
+        <button className="feed-action" title="Edit caption and schedule" onClick={() => onEdit(upload)}>
+          <CalendarClock size={15} />
+        </button>
+      )}
+      {!upload.folderSource && (
+        <button className="feed-del" title="Delete post" onClick={async () => { if(confirm('Delete?')) { setDeleting(true); await api.deleteUpload(upload.id); onRefresh(); setDeleting(false); } }} disabled={deleting}>
+          {deleting ? <Loader2 className="spin" size={14} /> : <Trash2 size={14} />}
+        </button>
+      )}
     </div>
   );
 }
 
-// --- CREATE MODAL (UPDATED WITH TITLE) ---
-function CreateModal({ platform, onClose, onSuccess }: { platform: Platform; onClose: () => void; onSuccess: () => void }) {
-  const [p, setP] = useState<Platform>(platform);
-  const [file, setFile] = useState<File | null>(null);
-  const [title, setTitle] = useState(""); // 👈 NEW TITLE STATE
-  const [caption, setCaption] = useState("");
-  const [schedule, setSchedule] = useState("");
+function FolderConnectionModal({
+  platform,
+  connection,
+  uploads,
+  onEdit,
+  onClose,
+  onSuccess,
+}: {
+  platform: Platform;
+  connection?: FolderConnection;
+  uploads: PlatformUpload[];
+  onEdit: (upload: PlatformUpload) => void;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [folderPath, setFolderPath] = useState(connection?.folderPath ?? "");
+  const [loading, setLoading] = useState(false);
+
+  const connect = async () => {
+    if (!folderPath.trim()) return alert("Enter the full folder path");
+    setLoading(true);
+    try {
+      await api.connectFolder(platform, folderPath.trim());
+      onSuccess();
+    } catch (error) {
+      alert("Error: " + (error instanceof Error ? error.message : "Could not connect folder"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!connection || !confirm(`Disconnect the ${platformLabels[platform]} folder?`)) return;
+    setLoading(true);
+    try {
+      await api.disconnectFolder(connection.id);
+      onSuccess();
+      onClose();
+    } catch (error) {
+      alert("Error: " + (error instanceof Error ? error.message : "Could not disconnect folder"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-panel compact-modal" onClick={event => event.stopPropagation()}>
+        <div className="modal-head"><span>{platformLabels[platform]} Folder</span><button onClick={onClose}><X size={22} /></button></div>
+        <div className="modal-body">
+          <div className="folder-platform-row">
+            <CustomIcon platform={platform} size={28} />
+            <strong>{platformLabels[platform]}</strong>
+            <span className={`connection-state ${connection?.lastError ? "error" : connection ? "active" : ""}`}>
+              {connection?.lastError ? "Sync error" : connection ? "Connected" : "Not connected"}
+            </span>
+          </div>
+          <div className="field">
+            <label>Local folder path</label>
+            <input
+              type="text"
+              value={folderPath}
+              onChange={event => setFolderPath(event.target.value)}
+              placeholder="C:\Users\YourName\Posts\Instagram"
+            />
+          </div>
+          {connection?.lastScannedAt && (
+            <div className="folder-scan-time">Last synced {new Date(connection.lastScannedAt).toLocaleString()}</div>
+          )}
+          {connection?.lastError && <div className="folder-error">{connection.lastError}</div>}
+          {connection && (
+            <div className="folder-posts">
+              <div className="folder-posts-head"><strong>Folder posts</strong><span>{uploads.length}</span></div>
+              {uploads.length === 0 ? (
+                <div className="folder-posts-empty">No media files detected</div>
+              ) : uploads.map(upload => (
+                <button className="folder-post-row" key={upload.id} onClick={() => onEdit(upload)}>
+                  <FileText size={18} />
+                  <span className="folder-post-name">{upload.folderSource?.relativePath ?? upload.originalName}</span>
+                  <span className="folder-post-schedule">
+                    {upload.scheduledAt ? new Date(upload.scheduledAt).toLocaleString() : "Needs schedule"}
+                  </span>
+                  <CalendarClock size={16} />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="modal-foot folder-modal-actions">
+          {connection && <button className="btn-danger" onClick={disconnect} disabled={loading}><Unplug size={15} /> Disconnect</button>}
+          <button className="btn-primary" onClick={connect} disabled={loading}>
+            {loading ? <Loader2 className="spin" size={17} /> : <FolderSync size={17} />}
+            {connection ? "Update folder" : "Connect folder"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditPostModal({
+  upload,
+  onClose,
+  onSuccess,
+}: {
+  upload: PlatformUpload;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [title, setTitle] = useState(upload.title ?? upload.caption);
+  const [caption, setCaption] = useState(upload.caption);
+  const [schedule, setSchedule] = useState(
+    upload.scheduledAt ? toLocalDateTimeInputValue(new Date(upload.scheduledAt)) : "",
+  );
   const [minimumSchedule] = useState(() => toLocalDateTimeInputValue(new Date(Date.now() + 60_000)));
   const [loading, setLoading] = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
-  const isYouTube = p === "youtube";
-  const isLinkedIn = p === "linkedin";
+  const isYouTube = upload.platform === "youtube";
 
-  const submit = async () => {
-    if (!file) return alert("Select a file");
-    if (isYouTube && !title.trim()) return alert("Video Title is required");
-    if (!caption.trim()) return alert(isLinkedIn ? "Write LinkedIn post text" : "Write a caption");
+  const save = async () => {
+    if (!caption.trim()) return alert("Caption is required");
+    if (isYouTube && !title.trim()) return alert("Video title is required");
 
     const scheduledDate = schedule ? new Date(schedule) : null;
+    if (upload.folderSource && !scheduledDate) return alert("Choose a schedule for this folder post");
     if (scheduledDate && (!Number.isFinite(scheduledDate.getTime()) || scheduledDate.getTime() <= Date.now())) {
       return alert("Choose a scheduled date and time in the future");
     }
 
     setLoading(true);
-    try { 
-      await api.uploadToPlatform(
-        p,
-        file,
-        isYouTube ? title.trim() : "",
-        caption.trim(),
-        scheduledDate?.toISOString(),
-      );
-      onSuccess(); 
-      onClose(); 
-    } catch (e) { alert("Error: " + (e instanceof Error ? e.message : "Unknown")); }
-    setLoading(false);
+    try {
+      await api.updateUploadDetails(upload.id, {
+        title: isYouTube ? title.trim() : undefined,
+        caption: caption.trim(),
+        scheduledAt: scheduledDate?.toISOString() ?? null,
+      });
+      onSuccess();
+      onClose();
+    } catch (error) {
+      alert("Error: " + (error instanceof Error ? error.message : "Could not save post"));
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-panel" onClick={e => e.stopPropagation()}>
-        <div className="modal-head"><span>New Post</span><button onClick={onClose}><X size={22} /></button></div>
+      <div className="modal-panel" onClick={event => event.stopPropagation()}>
+        <div className="modal-head"><span>Schedule Post</span><button onClick={onClose}><X size={22} /></button></div>
         <div className="modal-body">
-          <div className="field"><label>Platform</label>
-            <div className="chip-group">
-              {platforms.map(pl => {
-                const color = platformColor[pl];
-                return <button key={pl} className={`chip ${pl === p ? 'active' : ''}`} onClick={() => setP(pl)} style={pl === p ? { borderColor: color, color: color } : {}}>{platformLabels[pl]}</button>
-              })}
-            </div>
+          <div className="edit-source-row">
+            <CustomIcon platform={upload.platform} size={28} />
+            <div><strong>{upload.originalName}</strong><span>{platformLabels[upload.platform]}</span></div>
           </div>
-          <div className="field"><label>File</label>
-            <div className="drop" onClick={() => ref.current?.click()} onDrop={e => { e.preventDefault(); setFile(e.dataTransfer.files[0]); }}>
-              <input type="file" hidden ref={ref} onChange={e => setFile(e.target.files?.[0] || null)} />
-              {file ? <div className="file-preview"><FileText size={20} /> {file.name} <button onClick={e => { e.stopPropagation(); setFile(null); }}>Remove</button></div> : <><Upload size={24} /> Click or drag file here</>}
-            </div>
-          </div>
-          {/* 👇 NEW TITLE FIELD */}
           {isYouTube && (
-            <div className="field">
-              <label>Video Title <span style={{color: '#EF4444'}}>*</span></label>
-              <input 
-                type="text" 
-                value={title} 
-                onChange={e => setTitle(e.target.value)} 
-                placeholder="Enter video title..." 
-              />
-            </div>
+            <div className="field"><label>Video title</label><input type="text" value={title} onChange={event => setTitle(event.target.value)} /></div>
           )}
           <div className="field">
-            <label>
-              {isYouTube ? "Description" : isLinkedIn ? "LinkedIn Post Text" : "Caption"}
-              <span style={{color: '#EF4444'}}> *</span>
-            </label>
-            <textarea
-              rows={isLinkedIn ? 5 : 3}
-              value={caption}
-              onChange={e => setCaption(e.target.value)}
-              placeholder={isLinkedIn ? "What do you want to talk about?" : "Write your post description..."}
-            />
+            <label>{isYouTube ? "Description" : "Caption"}</label>
+            <textarea rows={5} value={caption} onChange={event => setCaption(event.target.value)} />
           </div>
-          <div className="field"><label>Schedule (optional)</label><input type="datetime-local" min={minimumSchedule} value={schedule} onChange={e => setSchedule(e.target.value)} /></div>
+          <div className="field">
+            <label>Scheduled date and time</label>
+            <input type="datetime-local" min={minimumSchedule} value={schedule} onChange={event => setSchedule(event.target.value)} />
+          </div>
         </div>
         <div className="modal-foot">
           <button className="btn-outline" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={submit} disabled={loading}>{loading ? <Loader2 className="spin" size={18} /> : schedule ? "Schedule" : "Publish"}</button>
+          <button className="btn-primary" onClick={save} disabled={loading}>
+            {loading ? <Loader2 className="spin" size={17} /> : <Pencil size={17} />} Save schedule
+          </button>
         </div>
       </div>
     </div>

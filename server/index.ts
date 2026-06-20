@@ -5,17 +5,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { platformSchema, updateUploadStatusSchema } from "../shared/schema";
+import { platformSchema, updateUploadDetailsSchema, updateUploadStatusSchema } from "../shared/schema";
 import {
   automationInput,
   createUpload,
   dashboardSummary,
   deleteUpload,
+  listFolderConnections,
   listUploads,
+  updateUploadDetails,
   updateUploadStatus
 } from "./storage";
 import { runAutomation } from "./services/publisher.js";
 import { startScheduler } from "./services/scheduler.js";
+import {
+  connectPlatformFolder,
+  disconnectPlatformFolder,
+  startFolderSync
+} from "./services/folder-sync.js";
 import "dotenv/config"; // 👈 IMPORTANT: Load .env file
 
 const app = express();
@@ -159,6 +166,23 @@ app.patch("/api/uploads/:id/status", async (req, res, next) => {
   }
 });
 
+app.patch("/api/uploads/:id", async (req, res, next) => {
+  try {
+    const payload = updateUploadDetailsSchema.parse(req.body);
+    const scheduledAt = payload.scheduledAt ? normalizeScheduledAt(payload.scheduledAt) : payload.scheduledAt;
+    const item = await updateUploadDetails(req.params.id, { ...payload, scheduledAt });
+
+    if (!item) {
+      res.status(404).json({ message: "Upload not found" });
+      return;
+    }
+
+    res.json(item);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // --- DELETE UPLOAD ---
 app.delete("/api/uploads/:id", async (req, res, next) => {
   try {
@@ -174,6 +198,39 @@ app.delete("/api/uploads/:id", async (req, res, next) => {
       await fs.promises.unlink(storedFilePath).catch(() => undefined);
     }
 
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- CONNECTED FOLDERS ---
+app.get("/api/folder-connections", async (_req, res, next) => {
+  try {
+    res.json(await listFolderConnections());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/platforms/:platform/folder-connection", async (req, res, next) => {
+  try {
+    const platform = platformSchema.parse(req.params.platform);
+    const folderPath = typeof req.body?.folderPath === "string" ? req.body.folderPath : "";
+    if (!folderPath.trim()) throw new Error("Folder path is required.");
+    res.json(await connectPlatformFolder(platform, folderPath));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/folder-connections/:id", async (req, res, next) => {
+  try {
+    const connection = await disconnectPlatformFolder(req.params.id);
+    if (!connection) {
+      res.status(404).json({ message: "Folder connection not found" });
+      return;
+    }
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -229,4 +286,5 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 app.listen(port, () => {
   console.log(`Tinitiate Autopost API listening on http://localhost:${port}`);
   startScheduler();
+  void startFolderSync().catch((error) => console.error("Folder sync startup failed:", error));
 });

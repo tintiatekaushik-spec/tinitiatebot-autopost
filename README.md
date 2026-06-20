@@ -1,14 +1,11 @@
 # Tinitiate Autopost
 
-A focused web app dashboard for uploading post files into platform-specific queues.
+A focused web app dashboard for synchronizing platform folders into scheduled publishing queues.
 
 The app is intentionally simple in this phase:
 
-- Instagram section with upload button.
-- X section with upload button.
-- LinkedIn section with upload button.
-- Facebook section with upload button.
-- Any file format can be uploaded.
+- Instagram, X, LinkedIn, Facebook, and YouTube folder connections.
+- Per-post title, caption, date, and time controls.
 - Uploaded files are stored locally and exposed as structured input for future n8n + Playwright automation.
 - No official social platform APIs are used.
 
@@ -52,6 +49,30 @@ instagram
 x
 linkedin
 facebook
+youtube
+```
+
+## Connected Folders
+
+Each platform card has a **Connect folder** action. Enter the absolute path of a local folder, such as:
+
+```text
+C:\Users\YourName\Posts\Instagram
+```
+
+- Image and video files are discovered recursively for every platform folder.
+- New files are added to the queue automatically and remain paused until a caption and future schedule are saved.
+- Deleting a source file removes its queued or failed post and cancels its schedule.
+- Published history is retained when its source file is deleted.
+- Connections are restored and fully rescanned whenever the API restarts.
+- The API server and computer must remain running for live filesystem detection and scheduled publishing.
+
+Folder connection endpoints:
+
+```text
+GET    /api/folder-connections
+POST   /api/platforms/:platform/folder-connection
+DELETE /api/folder-connections/:id
 ```
 
 List all uploads:

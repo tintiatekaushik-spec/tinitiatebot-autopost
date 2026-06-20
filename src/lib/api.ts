@@ -1,4 +1,12 @@
-import type { AutomationInput, DashboardSummary, Platform, PlatformUpload, UpdateUploadStatusInput } from "../../shared/schema";
+import type {
+  AutomationInput,
+  DashboardSummary,
+  FolderConnection,
+  Platform,
+  PlatformUpload,
+  UpdateUploadDetailsInput,
+  UpdateUploadStatusInput
+} from "../../shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -30,22 +38,14 @@ export const api = {
   
   uploads: (platform?: Platform) => request<PlatformUpload[]>(`/api/uploads${platform ? `?platform=${platform}` : ""}`),
   
-  // 👈 UPDATED: Added 'title' parameter
-  uploadToPlatform: (platform: Platform, file: File, title: string, caption: string, scheduledAt?: string) => {
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("title", title);
-    formData.append("caption", caption);
-    if (scheduledAt) formData.append("scheduledAt", scheduledAt);
-
-    return request<PlatformUpload>(`/api/platforms/${platform}/uploads`, {
-      method: "POST",
-      body: formData
-    });
-  },
-  
   updateUploadStatus: (id: string, payload: UpdateUploadStatusInput) =>
     request<PlatformUpload>(`/api/uploads/${id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+
+  updateUploadDetails: (id: string, payload: UpdateUploadDetailsInput) =>
+    request<PlatformUpload>(`/api/uploads/${id}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
@@ -54,6 +54,17 @@ export const api = {
     request<void>(`/api/uploads/${id}`, {
       method: "DELETE"
     }),
+
+  folderConnections: () => request<FolderConnection[]>("/api/folder-connections"),
+
+  connectFolder: (platform: Platform, folderPath: string) =>
+    request<{ connection: FolderConnection; sync: { added: number; updated: number; removed: number } }>(
+      `/api/platforms/${platform}/folder-connection`,
+      { method: "POST", body: JSON.stringify({ folderPath }) },
+    ),
+
+  disconnectFolder: (connectionId: string) =>
+    request<void>(`/api/folder-connections/${connectionId}`, { method: "DELETE" }),
     
   automationInput: () => request<AutomationInput>("/api/automation/input"),
   
