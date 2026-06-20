@@ -75,6 +75,11 @@ const platformColor: Record<Platform, string> = {
   facebook: '#1877F2'
 };
 
+function toLocalDateTimeInputValue(date: Date) {
+  const localTime = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return localTime.toISOString().slice(0, 16);
+}
+
 export default function App() {
   const [uploads, setUploads] = useState<PlatformUpload[]>([]);
   const [loading, setLoading] = useState(true);
@@ -83,14 +88,18 @@ export default function App() {
   const [showModal, setShowModal] = useState(false);
   const [selectedPlatform, setSelectedPlatform] = useState<Platform>("youtube");
 
-  const refresh = useCallback(async () => {
-    setError(null); setLoading(true);
+  const refresh = useCallback(async (showLoading = true) => {
+    setError(null); if (showLoading) setLoading(true);
     try { setUploads(await api.uploads()); } 
     catch (e) { setError(e instanceof Error ? e.message : "Failed."); }
-    finally { setLoading(false); }
+    finally { if (showLoading) setLoading(false); }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    const refreshTimer = window.setInterval(() => void refresh(false), 5000);
+    return () => window.clearInterval(refreshTimer);
+  }, [refresh]);
 
   const stats = useMemo(() => ({
     total: uploads.length,
@@ -152,7 +161,7 @@ export default function App() {
             {isRunning ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
             {isRunning ? "Running..." : "Run Automation"}
           </button>
-          <button className="btn-icon" onClick={refresh}><RefreshCw size={18} className={loading ? "spin" : ""} /></button>
+          <button className="btn-icon" onClick={() => void refresh()}><RefreshCw size={18} className={loading ? "spin" : ""} /></button>
         </div>
       </header>
 
@@ -272,6 +281,9 @@ export default function App() {
 function FeedItem({ upload, onRefresh }: { upload: PlatformUpload; onRefresh: () => void }) {
   const [deleting, setDeleting] = useState(false);
   const time = new Date(upload.uploadedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const scheduledTime = upload.scheduledAt
+    ? new Date(upload.scheduledAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : null;
 
   return (
     <div className="feed-item">
@@ -280,7 +292,10 @@ function FeedItem({ upload, onRefresh }: { upload: PlatformUpload; onRefresh: ()
       </div>
       <div className="feed-info">
         <span className="feed-name">{upload.originalName.slice(0, 30)}</span>
-        <span className="feed-meta">{time} · {(upload as any).caption || 'No caption'}</span>
+        <span className="feed-meta">
+          {scheduledTime && <Clock size={12} />}
+          {scheduledTime ? `Scheduled ${scheduledTime}` : time} · {upload.caption || 'No caption'}
+        </span>
       </div>
       <span className={`badge badge-${upload.status}`}><span className="dot"></span>{upload.status}</span>
       <button className="feed-del" onClick={async () => { if(confirm('Delete?')) { setDeleting(true); await api.deleteUpload(upload.id); onRefresh(); setDeleting(false); } }} disabled={deleting}>
@@ -297,6 +312,7 @@ function CreateModal({ platform, onClose, onSuccess }: { platform: Platform; onC
   const [title, setTitle] = useState(""); // 👈 NEW TITLE STATE
   const [caption, setCaption] = useState("");
   const [schedule, setSchedule] = useState("");
+  const [minimumSchedule] = useState(() => toLocalDateTimeInputValue(new Date(Date.now() + 60_000)));
   const [loading, setLoading] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   const isYouTube = p === "youtube";
@@ -306,9 +322,21 @@ function CreateModal({ platform, onClose, onSuccess }: { platform: Platform; onC
     if (!file) return alert("Select a file");
     if (isYouTube && !title.trim()) return alert("Video Title is required");
     if (!caption.trim()) return alert(isLinkedIn ? "Write LinkedIn post text" : "Write a caption");
+
+    const scheduledDate = schedule ? new Date(schedule) : null;
+    if (scheduledDate && (!Number.isFinite(scheduledDate.getTime()) || scheduledDate.getTime() <= Date.now())) {
+      return alert("Choose a scheduled date and time in the future");
+    }
+
     setLoading(true);
     try { 
-      await api.uploadToPlatform(p, file, isYouTube ? title.trim() : "", caption.trim(), schedule || undefined); 
+      await api.uploadToPlatform(
+        p,
+        file,
+        isYouTube ? title.trim() : "",
+        caption.trim(),
+        scheduledDate?.toISOString(),
+      );
       onSuccess(); 
       onClose(); 
     } catch (e) { alert("Error: " + (e instanceof Error ? e.message : "Unknown")); }
@@ -358,11 +386,11 @@ function CreateModal({ platform, onClose, onSuccess }: { platform: Platform; onC
               placeholder={isLinkedIn ? "What do you want to talk about?" : "Write your post description..."}
             />
           </div>
-          <div className="field"><label>Schedule (optional)</label><input type="datetime-local" value={schedule} onChange={e => setSchedule(e.target.value)} /></div>
+          <div className="field"><label>Schedule (optional)</label><input type="datetime-local" min={minimumSchedule} value={schedule} onChange={e => setSchedule(e.target.value)} /></div>
         </div>
         <div className="modal-foot">
           <button className="btn-outline" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={submit} disabled={loading}>{loading ? <Loader2 className="spin" size={18} /> : "Publish"}</button>
+          <button className="btn-primary" onClick={submit} disabled={loading}>{loading ? <Loader2 className="spin" size={18} /> : schedule ? "Schedule" : "Publish"}</button>
         </div>
       </div>
     </div>

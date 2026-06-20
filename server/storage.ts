@@ -30,6 +30,8 @@ type StoredFileInput = {
   scheduledAt?: string;
 };
 
+export type AutomationInputMode = "ready" | "scheduledOnly";
+
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataFile = resolveFromRoot(process.env.DATA_FILE ?? "./data/store.json");
 
@@ -46,6 +48,24 @@ function emptyStore(): Store {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function scheduledTime(upload: PlatformUpload) {
+  if (!upload.scheduledAt) return null;
+  const timestamp = Date.parse(upload.scheduledAt);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+export function isUploadReadyForAutomation(upload: PlatformUpload, now = Date.now()) {
+  if (upload.status !== "queued") return false;
+  const scheduledAt = scheduledTime(upload);
+  return scheduledAt === null ? !upload.scheduledAt : scheduledAt <= now;
+}
+
+export function isDueScheduledUpload(upload: PlatformUpload, now = Date.now()) {
+  if (upload.status !== "queued" || !upload.scheduledAt) return false;
+  const scheduledAt = scheduledTime(upload);
+  return scheduledAt !== null && scheduledAt <= now;
 }
 
 async function ensureStore() {
@@ -97,7 +117,7 @@ export async function dashboardSummary(): Promise<DashboardSummary> {
 
   return {
     totalUploads: uploads.length,
-    readyForAutomation: uploads.filter((upload) => upload.status === "queued").length,
+    readyForAutomation: uploads.filter((upload) => isUploadReadyForAutomation(upload)).length,
     processing: uploads.filter((upload) => upload.status === "processing").length,
     posted: uploads.filter((upload) => upload.status === "posted").length,
     failed: uploads.filter((upload) => upload.status === "failed").length,
@@ -184,9 +204,19 @@ export async function deleteUpload(uploadId: string) {
   return existing;
 }
 
-export async function automationInput(platform?: Platform): Promise<AutomationInput> {
+export async function listDueScheduledUploads() {
+  const uploads = await listUploads();
+  return uploads.filter((upload) => isDueScheduledUpload(upload));
+}
+
+export async function automationInput(
+  platform?: Platform,
+  mode: AutomationInputMode = "ready",
+): Promise<AutomationInput> {
   const uploads = await listUploads(platform);
-  const queued = uploads.filter((upload) => upload.status === "queued");
+  const queued = uploads.filter((upload) =>
+    mode === "scheduledOnly" ? isDueScheduledUpload(upload) : isUploadReadyForAutomation(upload),
+  );
 
   const channels = Object.fromEntries(
     platforms.map((channel) => [

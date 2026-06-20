@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-import { automationInput, updateUploadStatus } from "../storage.js";
+import { automationInput, updateUploadStatus, type AutomationInputMode } from "../storage.js";
 import { postToFacebook } from "./publishers/facebook.js";
 import { postToInstagram } from "./publishers/instagram.js";
 import { postToLinkedIn } from "./publishers/linkedin.js";
@@ -252,9 +252,20 @@ async function runXApps(xUploads: any[]) {
   }
 }
 
-export async function runAutomation() {
-  console.log("Starting publisher automation...");
-  const { channels } = await automationInput();
+type RunAutomationOptions = {
+  mode?: AutomationInputMode;
+  trigger?: "manual" | "scheduler";
+};
+
+let activeAutomationRun: Promise<void> | null = null;
+
+export function isAutomationRunning() {
+  return activeAutomationRun !== null;
+}
+
+async function runAutomationOnce({ mode = "ready", trigger = "manual" }: RunAutomationOptions) {
+  console.log(`Starting publisher automation (${trigger})...`);
+  const { channels } = await automationInput(undefined, mode);
 
   const youtubeUploads = channels.youtube || [];
   const linkedinUploads = channels.linkedin || [];
@@ -269,7 +280,7 @@ export async function runAutomation() {
     facebookUploads.length === 0 &&
     xUploads.length === 0
   ) {
-    console.log("No queued uploads for YouTube, LinkedIn, Instagram, Facebook, or X.");
+    console.log("No due uploads for YouTube, LinkedIn, Instagram, Facebook, or X.");
     return;
   }
 
@@ -284,4 +295,17 @@ export async function runAutomation() {
   if (xUploads.length > 0) {
     await runXApps(xUploads);
   }
+}
+
+export function runAutomation(options: RunAutomationOptions = {}) {
+  if (activeAutomationRun) {
+    console.log("Publisher automation is already running; reusing the active run.");
+    return activeAutomationRun;
+  }
+
+  activeAutomationRun = runAutomationOnce(options).finally(() => {
+    activeAutomationRun = null;
+  });
+
+  return activeAutomationRun;
 }

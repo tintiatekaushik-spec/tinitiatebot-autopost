@@ -15,6 +15,7 @@ import {
   updateUploadStatus
 } from "./storage";
 import { runAutomation } from "./services/publisher.js";
+import { startScheduler } from "./services/scheduler.js";
 import "dotenv/config"; // 👈 IMPORTANT: Load .env file
 
 const app = express();
@@ -26,6 +27,17 @@ fs.mkdirSync(uploadDir, { recursive: true });
 
 function resolveFromRoot(candidate: string) {
   return path.isAbsolute(candidate) ? candidate : path.resolve(rootDir, candidate);
+}
+
+function normalizeScheduledAt(value: unknown) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new Error("Scheduled date and time must be a string.");
+
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) throw new Error("Scheduled date and time is invalid.");
+  if (timestamp <= Date.now()) throw new Error("Scheduled date and time must be in the future.");
+
+  return new Date(timestamp).toISOString();
 }
 
 const upload = multer({
@@ -101,6 +113,8 @@ app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, 
     const platform = platformSchema.parse(req.params.platform);
     const { title, caption, scheduledAt } = req.body; // 👈 EXTRACT TITLE
 
+    const normalizedScheduledAt = normalizeScheduledAt(scheduledAt);
+
     if (!req.file) {
       res.status(400).json({ message: "Upload a file with form field name `file`." });
       return;
@@ -119,7 +133,7 @@ app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, 
       url: `/uploads/${req.file.filename}`,
       title: title?.trim() || caption.trim(), // 👈 Use title if provided, else fallback
       caption: caption.trim(),
-      scheduledAt: scheduledAt || undefined
+      scheduledAt: normalizedScheduledAt
     });
 
     res.status(201).json(item);
@@ -187,7 +201,7 @@ app.get("/api/automation/platforms/:platform/input", async (req, res, next) => {
 // --- TRIGGER AUTOMATION ---
 app.post("/api/automation/run", async (req, res, next) => {
   try {
-    runAutomation().catch(err => console.error("Background error:", err));
+    runAutomation({ trigger: "manual" }).catch(err => console.error("Background error:", err));
     res.json({ message: "Publisher automation started. Check server logs." });
   } catch (error) {
     next(error);
@@ -214,4 +228,5 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 
 app.listen(port, () => {
   console.log(`Tinitiate Autopost API listening on http://localhost:${port}`);
+  startScheduler();
 });

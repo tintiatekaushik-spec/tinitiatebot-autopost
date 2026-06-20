@@ -392,6 +392,9 @@ body {
 .feed-meta {
   font-size: 13px;
   color: #64748B;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .badge {
