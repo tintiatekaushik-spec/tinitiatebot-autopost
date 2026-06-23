@@ -5,18 +5,23 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { platformSchema, updateUploadDetailsSchema, updateUploadStatusSchema, upsertPlatformAccountSchema } from "../shared/schema";
+import { platformSchema, scheduleIdSchema, updateUploadDetailsSchema, updateUploadStatusSchema, upsertPlatformAccountSchema, upsertPublishingScheduleSchema } from "../shared/schema";
 import {
   automationInput,
   createPlatformAccount,
+  createPublishingSchedule,
   createUpload,
   dashboardSummary,
   deletePlatformAccount,
+  deletePublishingSchedule,
   deleteUpload,
   getPlatformAccount,
   listFolderConnections,
   listPlatformAccounts,
+  listPublishingSchedules,
+  listSocialMediaSchedules,
   listUploads,
+  updatePublishingSchedule,
   updatePlatformAccount,
   updateUploadDetails,
   updateUploadStatus
@@ -163,6 +168,61 @@ app.delete("/api/accounts/:id", async (req, res, next) => {
       return;
     }
     res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- REUSABLE SCHEDULES ---
+app.get("/api/schedules", async (_req, res, next) => {
+  try {
+    res.json(await listPublishingSchedules());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/schedules", async (req, res, next) => {
+  try {
+    const payload = upsertPublishingScheduleSchema.parse(req.body);
+    res.status(201).json(await createPublishingSchedule(payload));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/schedules/:id", async (req, res, next) => {
+  try {
+    const scheduleId = scheduleIdSchema.parse(req.params.id);
+    const payload = upsertPublishingScheduleSchema.parse(req.body);
+    const schedule = await updatePublishingSchedule(scheduleId, payload);
+    if (!schedule) {
+      res.status(404).json({ message: "Schedule not found" });
+      return;
+    }
+    res.json(schedule);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/schedules/:id", async (req, res, next) => {
+  try {
+    const scheduleId = scheduleIdSchema.parse(req.params.id);
+    const schedule = await deletePublishingSchedule(scheduleId);
+    if (!schedule) {
+      res.status(404).json({ message: "Schedule not found" });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/social-media-schedules", async (_req, res, next) => {
+  try {
+    res.json(await listSocialMediaSchedules());
   } catch (error) {
     next(error);
   }

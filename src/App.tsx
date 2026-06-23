@@ -1,20 +1,16 @@
 import {
-  Clock, Loader2, Play, RefreshCw, X,
-  CalendarClock, FileText, FolderSync, Pencil, Trash2, TrendingUp, Unplug,
+  Loader2, RefreshCw, X,
+  CalendarClock, FileText, FolderSync, Pencil, Trash2, Unplug,
   ArrowRight, BriefcaseBusiness, KeyRound, LockKeyhole, LogOut, ShieldCheck, UsersRound,
-  Activity, CalendarDays, ChevronLeft, ChevronRight, CircleAlert, CircleCheckBig,
+  CalendarDays, ChevronLeft, ChevronRight, CircleAlert, CircleCheckBig,
   CircleDashed, FolderOpen, LayoutDashboard, ListFilter, Send, TimerReset,
   Bookmark, Eye, Heart, MessageCircle, MoreHorizontal, Repeat2, Share2, ThumbsUp
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FaFacebook, FaInstagram, FaLinkedin, FaXTwitter, FaYoutube } from "react-icons/fa6";
-import type { FolderConnection, Platform, PlatformAccount, PlatformUpload } from "../shared/schema";
-import { platformLabels, platforms } from "../shared/schema";
+import type { FolderConnection, Platform, PlatformAccount, PlatformUpload, PublishingSchedule, ScheduleFrequency, ScheduleStatus } from "../shared/schema";
+import { platformLabels, platforms, scheduleFrequencies, scheduleFrequencyLabels } from "../shared/schema";
 import { api } from "./lib/api";
-import {
-  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, 
-  Tooltip, ResponsiveContainer, CartesianGrid
-} from "recharts";
 
 // --- PLATFORM BRAND ICONS ---
 const CustomIcon = ({ platform, size = 28 }: { platform: Platform; size?: number }) => {
@@ -209,23 +205,34 @@ function LandingPage({ onSignIn }: { onSignIn: (role: UserRole) => void }) {
 function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void }) {
   const [uploads, setUploads] = useState<PlatformUpload[]>([]);
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
+  const [schedules, setSchedules] = useState<PublishingSchedule[]>([]);
   const [folderConnections, setFolderConnections] = useState<FolderConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [folderPlatform, setFolderPlatform] = useState<Platform | null>(null);
+  const [scheduleManagerOpen, setScheduleManagerOpen] = useState(false);
   const [editingUpload, setEditingUpload] = useState<PlatformUpload | null>(null);
 
   const refresh = useCallback(async (showLoading = true) => {
-    setError(null); if (showLoading) setLoading(true);
+    setError(null);
+    if (showLoading) setLoading(true);
     try {
-      const [latestUploads, latestAccounts, latestConnections] = await Promise.all([api.uploads(), api.accounts(), api.folderConnections()]);
+      const [latestUploads, latestAccounts, latestSchedules, latestConnections] = await Promise.all([
+        api.uploads(),
+        api.accounts(),
+        api.schedules(),
+        api.folderConnections(),
+      ]);
       setUploads(latestUploads);
       setAccounts(latestAccounts);
+      setSchedules(latestSchedules);
       setFolderConnections(latestConnections);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed.');
+    } finally {
+      if (showLoading) setLoading(false);
     }
-    catch (e) { setError(e instanceof Error ? e.message : "Failed."); }
-    finally { if (showLoading) setLoading(false); }
   }, []);
 
   useEffect(() => {
@@ -234,271 +241,52 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
     return () => window.clearInterval(refreshTimer);
   }, [refresh]);
 
-  const stats = useMemo(() => ({
-    total: uploads.length,
-    queued: uploads.filter(u => u.status === "queued").length,
-    posted: uploads.filter(u => u.status === "posted").length,
-    failed: uploads.filter(u => u.status === "failed").length,
-  }), [uploads]);
-
-  const successRate = stats.total ? Math.round((stats.posted / stats.total) * 100) : 0;
-
-  const distData = useMemo(() => {
-    const counts: Record<string, number> = {};
-    platforms.forEach(p => counts[p] = 0);
-    uploads.forEach(u => counts[u.platform] = (counts[u.platform] || 0) + 1);
-    return platforms.map(p => ({ name: platformLabels[p], value: counts[p] || 0, color: platformColor[p] }))
-      .filter(d => d.value > 0);
-  }, [uploads]);
-
-  const activityData = useMemo(() => {
-    const days: Record<string, number> = {};
-    const now = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now); d.setDate(d.getDate() - i);
-      const key = d.toISOString().split('T')[0];
-      days[key] = 0;
-    }
-    uploads.forEach(u => {
-      const date = new Date(u.uploadedAt).toISOString().split('T')[0];
-      if (days[date] !== undefined) days[date] = (days[date] || 0) + 1;
-    });
-    return Object.entries(days).map(([date, count]) => ({
-      day: new Date(date).toLocaleDateString('en-US', { weekday: 'short' }),
-      posts: count
-    }));
-  }, [uploads]);
-
   const handleRun = async () => {
     setIsRunning(true);
-    try { await api.runAutomation(); alert("Automation started."); setTimeout(refresh, 5000); } 
-    catch (e) { alert("Error: " + (e instanceof Error ? e.message : "Unknown")); }
-    setIsRunning(false);
+    try {
+      await api.runAutomation();
+      alert('Automation started.');
+      window.setTimeout(() => void refresh(false), 5000);
+    } catch (e) {
+      alert('Error: ' + (e instanceof Error ? e.message : 'Unknown'));
+    } finally {
+      setIsRunning(false);
+    }
   };
 
   return (
-    <MonitoringConsole
-      role={role}
-      uploads={uploads}
-      accounts={accounts}
-      folderConnections={folderConnections}
-      loading={loading}
-      error={error}
-      isRunning={isRunning}
-      onRun={handleRun}
-      onRefresh={() => void refresh()}
-      onSignOut={onSignOut}
-      onOpenFolder={setFolderPlatform}
-      onEdit={setEditingUpload}
-      activeFolder={folderPlatform}
-      editingUpload={editingUpload}
-      onCloseFolder={() => setFolderPlatform(null)}
-      onCloseEdit={() => setEditingUpload(null)}
-    />
-  );
-
-  return (
-    <div className="app-container">
-      <header className="top-header">
-        <div className="header-left" style={{ display: 'flex', alignItems: 'center', gap: '32px' }}>
-          <div className="brand">Tinitiate<span>Autobot</span></div>
-          <div className="header-stats">
-            <span><span className="dot green"></span>{stats.posted}</span>
-            <span><span className="dot yellow"></span>{stats.queued}</span>
-            <span><span className="dot red"></span>{stats.failed}</span>
-          </div>
-        </div>
-        <div className='header-right'>
-          <span className='session-role'>{loginCredentials[role].label}</span>
-          <button className='btn-run' onClick={handleRun} disabled={isRunning}>
-            {isRunning ? <Loader2 className='spin' size={16} /> : <Play size={16} />}
-            {isRunning ? 'Running...' : 'Run Automation'}
-          </button>
-          <button className='btn-icon' title='Refresh dashboard' onClick={() => void refresh()}><RefreshCw size={18} className={loading ? 'spin' : ''} /></button>
-          <button className='btn-icon logout-button' title='Sign out' onClick={onSignOut}><LogOut size={18} /></button>
-        </div>
-      </header>
-
-      <div className="kpi-grid">
-        <div className="kpi"><span>Total</span><strong>{stats.total}</strong></div>
-        <div className="kpi"><span>Queued</span><strong>{stats.queued}</strong></div>
-        <div className="kpi"><span>Posted</span><strong>{stats.posted}</strong></div>
-        <div className="kpi"><span>Failed</span><strong>{stats.failed}</strong></div>
-        <div className="kpi success"><span>Success Rate</span><strong>{successRate}% <TrendingUp size={18} /></strong></div>
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-
-      <section className="platform-hero">
-        {platforms.map(p => {
-          const items = uploads.filter(u => u.platform === p);
-          const folderConnection = folderConnections.find(connection => connection.platform === p);
-          const folderItems = items.filter(item => item.folderSource?.present);
-          const q = items.filter(u => u.status === "queued").length;
-          const po = items.filter(u => u.status === "posted").length;
-          const f = items.filter(u => u.status === "failed").length;
-          const prog = items.length ? Math.round((po / items.length) * 100) : 0;
-          
-          const radius = 22;
-          const circumference = 2 * Math.PI * radius;
-          const offset = circumference - (prog / 100) * circumference;
-
-          return (
-            <div 
-              key={p} 
-              className="platform-card-premium" 
-              data-platform={p}
-              onClick={() => setFolderPlatform(p)}
-            >
-              <div className="card-head">
-                <div className="platform-icon-svg"><CustomIcon platform={p} size={28} /></div>
-                <span className="p-name">{platformLabels[p]}</span>
-                <span className="p-count">{items.length}</span>
-              </div>
-              
-              <div className="p-progress-ring">
-                <svg className="progress-ring-svg" viewBox="0 0 56 56">
-                  <circle className="progress-ring-bg" cx="28" cy="28" r={radius} />
-                  <circle 
-                    className="progress-ring-fg" 
-                    cx="28" cy="28" r={radius} 
-                    stroke={platformColor[p]}
-                    strokeDasharray={circumference} 
-                    strokeDashoffset={offset} 
-                  />
-                </svg>
-                <span className="ring-label">{prog}%</span>
-              </div>
-
-              <div className="p-stats">
-                <span><span className="dot q"></span>{q} Queue</span>
-                <span><span className="dot p"></span>{po} Posted</span>
-                <span><span className="dot f"></span>{f} Failed</span>
-              </div>
-
-              <div className="p-actions">
-                <button
-                  type="button"
-                  className={`p-folder-zone ${folderConnection ? "connected" : ""}`}
-                  title={folderConnection?.folderPath ?? `Connect ${platformLabels[p]} folder`}
-                  onClick={event => {
-                    event.stopPropagation();
-                    setFolderPlatform(p);
-                  }}
-                >
-                  <FolderSync size={15} /> {folderConnection ? `Open folder (${folderItems.length})` : "Connect folder"}
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </section>
-
-      <section className="charts-section">
-        <div className="charts-grid">
-          <div className="chart-box">
-            <div className="chart-label">Platform Distribution</div>
-            <div className="chart-wrap">
-              {distData.length === 0 ? <div className="empty-state">Upload content to populate</div> : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={distData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={2} dataKey="value">
-                      {distData.map((d, i) => <Cell key={i} fill={d.color} stroke="#FFFFFF" strokeWidth={2} />)}
-                    </Pie>
-                    <Tooltip contentStyle={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }} />
-                  </PieChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-          <div className="chart-box">
-            <div className="chart-label">7-Day Activity</div>
-            <div className="chart-wrap">
-              {activityData.every(d => d.posts === 0) ? <div className="empty-state">No posts in last 7 days</div> : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={activityData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" vertical={false} />
-                    <XAxis dataKey="day" stroke="#94A3B8" fontSize={12} />
-                    <YAxis stroke="#94A3B8" fontSize={12} allowDecimals={false} />
-                    <Tooltip contentStyle={{ background: '#FFFFFF', border: '1px solid #E2E8F0', borderRadius: '8px' }} />
-                    <Bar dataKey="posts" fill="#4F46E5" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="feed-section">
-        <div className="feed-header"><span>Recent Activity</span><span>{uploads.length} events</span></div>
-        <div className="feed-list">
-          {uploads.length === 0 ? <div className="empty-state" style={{ padding: '20px' }}>No activity yet</div> : 
-            uploads.map(u => <FeedItem key={u.id} upload={u} onRefresh={refresh} onEdit={setEditingUpload} />)
-          }
-        </div>
-      </section>
-
-      {folderPlatform && (
-        <FolderConnectionModal
-          platform={folderPlatform!}
-          accounts={accounts.filter(item => item.platform === folderPlatform!)}
-          connections={folderConnections.filter(item => item.platform === folderPlatform!)}
-          uploads={uploads.filter(item => item.platform === folderPlatform!)}
-          onEdit={setEditingUpload}
-          onClose={() => setFolderPlatform(null)}
-          onSuccess={refresh}
+    <>
+      <Workboard
+        role={role}
+        uploads={uploads}
+        accounts={accounts}
+        schedules={schedules}
+        folderConnections={folderConnections}
+        loading={loading}
+        error={error}
+        isRunning={isRunning}
+        onRun={handleRun}
+        onRefresh={() => void refresh()}
+        onSignOut={onSignOut}
+        onOpenFolder={setFolderPlatform}
+        onOpenSchedules={() => setScheduleManagerOpen(true)}
+        onEdit={setEditingUpload}
+        activeFolder={folderPlatform}
+        editingUpload={editingUpload}
+        onCloseFolder={() => setFolderPlatform(null)}
+        onCloseEdit={() => setEditingUpload(null)}
+      />
+      {scheduleManagerOpen && (
+        <ScheduleManagerModal
+          schedules={schedules}
+          uploads={uploads}
+          onClose={() => setScheduleManagerOpen(false)}
+          onSuccess={() => void refresh()}
         />
       )}
-      {editingUpload && (
-        <EditPostModal upload={editingUpload!} accounts={accounts.filter(item => item.platform === editingUpload!.platform)} onClose={() => setEditingUpload(null)} onSuccess={refresh} />
-      )}
-    </div>
+    </>
   );
 }
-
-function FeedItem({
-  upload,
-  onRefresh,
-  onEdit,
-}: {
-  upload: PlatformUpload;
-  onRefresh: () => void;
-  onEdit: (upload: PlatformUpload) => void;
-}) {
-  const [deleting, setDeleting] = useState(false);
-  const time = new Date(upload.uploadedAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const scheduledTime = upload.scheduledAt
-    ? new Date(upload.scheduledAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-    : null;
-
-  return (
-    <div className="feed-item">
-      <div className="feed-icon" style={{ background: platformColor[upload.platform] + '15', borderColor: platformColor[upload.platform] + '40' }}>
-        <CustomIcon platform={upload.platform} size={18} />
-      </div>
-      <div className="feed-info">
-        <span className="feed-name">{upload.originalName.slice(0, 30)}</span>
-        <span className="feed-meta">
-          {scheduledTime && <Clock size={12} />}
-          {scheduledTime ? `Scheduled ${scheduledTime}` : upload.folderSource ? "Needs schedule" : time} · {upload.caption || 'No caption'}
-        </span>
-      </div>
-      <span className={`badge badge-${upload.status}`}><span className="dot"></span>{upload.status}</span>
-      {(upload.status === "queued" || upload.status === "failed") && (
-        <button className="feed-action" title="Edit caption and schedule" onClick={() => onEdit(upload)}>
-          <CalendarClock size={15} />
-        </button>
-      )}
-      {!upload.folderSource && (
-        <button className="feed-del" title="Delete post" onClick={async () => { if(confirm('Delete?')) { setDeleting(true); await api.deleteUpload(upload.id); onRefresh(); setDeleting(false); } }} disabled={deleting}>
-          {deleting ? <Loader2 className="spin" size={14} /> : <Trash2 size={14} />}
-        </button>
-      )}
-    </div>
-  );
-}
-
 function toLocalDayKey(value: string | Date) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '';
@@ -534,371 +322,11 @@ function formatCalendarHeading(dayKey: string) {
   return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 }
 
-function MonitoringConsole({
-  role,
-  uploads,
-  accounts,
-  folderConnections,
-  loading,
-  error,
-  isRunning,
-  onRun,
-  onRefresh,
-  onSignOut,
-  onOpenFolder,
-  onEdit,
-  activeFolder,
-  editingUpload,
-  onCloseFolder,
-  onCloseEdit,
-}: {
-  role: UserRole;
-  uploads: PlatformUpload[];
-  accounts: PlatformAccount[];
-  folderConnections: FolderConnection[];
-  loading: boolean;
-  error: string | null;
-  isRunning: boolean;
-  onRun: () => void;
-  onRefresh: () => void;
-  onSignOut: () => void;
-  onOpenFolder: (platform: Platform) => void;
-  onEdit: (upload: PlatformUpload) => void;
-  activeFolder: Platform | null;
-  editingUpload: PlatformUpload | null;
-  onCloseFolder: () => void;
-  onCloseEdit: () => void;
-}) {
-  const [calendarMonth, setCalendarMonth] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
-  });
-  const [selectedDay, setSelectedDay] = useState(() => toLocalDayKey(new Date()));
-  const [platformFilter, setPlatformFilter] = useState<Platform | 'all'>('all');
-  const [statusFilter, setStatusFilter] = useState<PlatformUpload['status'] | 'all'>('all');
-
-  const stats = useMemo(() => {
-    const posted = uploads.filter(upload => upload.status === 'posted').length;
-    const queued = uploads.filter(upload => upload.status === 'queued').length;
-    const scheduled = uploads.filter(upload => upload.status === 'queued' && upload.scheduledAt).length;
-    const failed = uploads.filter(upload => upload.status === 'failed').length;
-    const completed = posted + failed;
-    return {
-      total: uploads.length,
-      posted,
-      queued,
-      scheduled,
-      failed,
-      successRate: completed ? Math.round((posted / completed) * 100) : 0,
-    };
-  }, [uploads]);
-
-  const eventByDay = useMemo(() => {
-    const events: Record<string, PlatformUpload[]> = {};
-    uploads.forEach(upload => {
-      const day = toLocalDayKey(getAuditTimestamp(upload));
-      if (!day) return;
-      events[day] ??= [];
-      events[day].push(upload);
-    });
-    Object.values(events).forEach(dayEvents => dayEvents.sort((a, b) => Date.parse(getAuditTimestamp(b)) - Date.parse(getAuditTimestamp(a))));
-    return events;
-  }, [uploads]);
-
-  const calendarDays = useMemo(() => {
-    const year = calendarMonth.getFullYear();
-    const month = calendarMonth.getMonth();
-    const offset = new Date(year, month, 1).getDay();
-    return Array.from({ length: 42 }, (_, index) => {
-      const date = new Date(year, month, index - offset + 1);
-      const key = toLocalDayKey(date);
-      return { date, key, currentMonth: date.getMonth() === month, events: eventByDay[key] ?? [] };
-    });
-  }, [calendarMonth, eventByDay]);
-
-  const weeklyActivity = useMemo(() => {
-    const counts: Record<string, number> = {};
-    const dates: Date[] = [];
-    for (let offset = 6; offset >= 0; offset -= 1) {
-      const date = new Date();
-      date.setHours(12, 0, 0, 0);
-      date.setDate(date.getDate() - offset);
-      dates.push(date);
-      counts[toLocalDayKey(date)] = 0;
-    }
-    uploads.forEach(upload => {
-      const key = toLocalDayKey(getAuditTimestamp(upload));
-      if (key in counts) counts[key] += 1;
-    });
-    return dates.map(date => ({
-      label: date.toLocaleDateString('en-US', { weekday: 'short' }),
-      date: toLocalDayKey(date),
-      count: counts[toLocalDayKey(date)]
-    }));
-  }, [uploads]);
-
-  const upcoming = useMemo(() => uploads
-    .filter(upload => upload.scheduledAt && upload.status !== 'posted')
-    .sort((a, b) => Date.parse(a.scheduledAt ?? '') - Date.parse(b.scheduledAt ?? ''))
-    .slice(0, 5), [uploads]);
-
-  const auditItems = useMemo(() => uploads
-    .filter(upload => platformFilter === 'all' || upload.platform === platformFilter)
-    .filter(upload => statusFilter === 'all' || upload.status === statusFilter)
-    .sort((a, b) => Date.parse(getAuditTimestamp(b)) - Date.parse(getAuditTimestamp(a)))
-    .slice(0, 12), [uploads, platformFilter, statusFilter]);
-
-  const selectedEvents = eventByDay[selectedDay] ?? [];
-  const maxWeeklyActivity = Math.max(1, ...weeklyActivity.map(day => day.count));
-  const monthLabel = calendarMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-
-  const shiftCalendarMonth = (amount: number) => {
-    const next = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + amount, 1);
-    setCalendarMonth(next);
-    setSelectedDay(toLocalDayKey(next));
-  };
-
-  const jumpTo = (sectionId: string) => {
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
-  return (
-    <Workboard
-      role={role}
-      uploads={uploads}
-      accounts={accounts}
-      folderConnections={folderConnections}
-      loading={loading}
-      error={error}
-      isRunning={isRunning}
-      onRun={onRun}
-      onRefresh={onRefresh}
-      onSignOut={onSignOut}
-      onOpenFolder={onOpenFolder}
-      onEdit={onEdit}
-      activeFolder={activeFolder}
-      editingUpload={editingUpload}
-      onCloseFolder={onCloseFolder}
-      onCloseEdit={onCloseEdit}
-    />
-  );
-
-  return (
-    <main className='studio-shell'>
-      <aside className='studio-rail'>
-        <div className='studio-rail-top'>
-          <div className='studio-wordmark'>
-            <span>Tinitiate</span>
-            <strong>Autobot</strong>
-          </div>
-          <span className='studio-rail-role'>{loginCredentials[role].label}</span>
-        </div>
-        <nav className='studio-navigation' aria-label='Workspace navigation'>
-          <button type='button' className='studio-nav-item active' onClick={() => jumpTo('overview')}><LayoutDashboard size={18} /><span>Overview</span></button>
-          <button type='button' className='studio-nav-item' onClick={() => jumpTo('analytics')}><Activity size={18} /><span>Analytics</span></button>
-          <button type='button' className='studio-nav-item' onClick={() => jumpTo('calendar')}><CalendarDays size={18} /><span>Calendar</span></button>
-          <button type='button' className='studio-nav-item' onClick={() => jumpTo('audit')}><ListFilter size={18} /><span>Audit reports</span></button>
-          <button type='button' className='studio-nav-item' onClick={() => jumpTo('folders')}><FolderOpen size={18} /><span>Media folders</span></button>
-        </nav>
-        <div className='studio-channel-list'>
-          <span>Channels</span>
-          {platforms.map(platform => {
-            const count = uploads.filter(upload => upload.platform === platform).length;
-            return <button type='button' key={platform} title={`Open ${platformLabels[platform]} folder`} onClick={() => onOpenFolder(platform)}><CustomIcon platform={platform} size={17} /><span>{platformLabels[platform]}</span><small>{count}</small></button>;
-          })}
-        </div>
-        <div className='studio-rail-footer'><CircleDashed size={14} />Monitor online</div>
-      </aside>
-
-      <section className='monitoring-shell'>
-      <header className='monitoring-header'>
-        <div className='monitoring-brand-wrap'>
-          <div className='monitoring-brand'><span>Workspace</span><strong>Publishing command center</strong></div>
-          <span className='live-indicator'><CircleDashed size={14} className={loading ? 'spin' : ''} />Live</span>
-        </div>
-        <div className='monitoring-actions'>
-          <span className='session-role'>{loginCredentials[role].label}</span>
-          <button className='run-automation-button' onClick={onRun} disabled={isRunning}>
-            {isRunning ? <Loader2 className='spin' size={16} /> : <Send size={16} />}
-            {isRunning ? 'Publishing' : 'Run automation'}
-          </button>
-          <button className='tool-icon-button' title='Refresh monitoring data' onClick={onRefresh}><RefreshCw size={18} className={loading ? 'spin' : ''} /></button>
-          <button className='tool-icon-button signout-tool' title='Sign out' onClick={onSignOut}><LogOut size={18} /></button>
-        </div>
-      </header>
-
-      {error && <div className='error-banner'>{error}</div>}
-
-      <section className='control-room-heading' id='overview' aria-labelledby='control-room-title'>
-        <div>
-          <p className='section-kicker'>Publishing operations</p>
-          <h1 id='control-room-title'>Control room</h1>
-        </div>
-        <div className='control-room-state'>
-          <Activity size={17} />
-          <span>{stats.scheduled} scheduled</span>
-          <span>{stats.queued} in queue</span>
-          <span>{stats.failed} need review</span>
-        </div>
-      </section>
-
-      <section className='metric-grid' aria-label='Post metrics'>
-        <article className='metric-tile'><span className='metric-icon neutral'><LayoutDashboard size={19} /></span><div><span>All posts</span><strong>{stats.total}</strong></div></article>
-        <article className='metric-tile'><span className='metric-icon success'><CircleCheckBig size={19} /></span><div><span>Published</span><strong>{stats.posted}</strong></div></article>
-        <article className='metric-tile'><span className='metric-icon schedule'><CalendarClock size={19} /></span><div><span>Scheduled</span><strong>{stats.scheduled}</strong></div></article>
-        <article className='metric-tile'><span className='metric-icon warning'><TimerReset size={19} /></span><div><span>Unscheduled queue</span><strong>{Math.max(0, stats.queued - stats.scheduled)}</strong></div></article>
-        <article className='metric-tile'><span className='metric-icon alert'><CircleAlert size={19} /></span><div><span>Delivery rate</span><strong>{stats.successRate}%</strong></div></article>
-      </section>
-
-      <section className='insight-grid' id='analytics' aria-label='Post analytics and schedule watch'>
-        <article className='report-panel analytics-panel'>
-          <header className='panel-header'>
-            <div><p className='section-kicker'>Post analytics</p><h2>Seven-day activity</h2></div>
-            <span className='panel-value'>{weeklyActivity.reduce((sum, day) => sum + day.count, 0)} events</span>
-          </header>
-          <div className='analytics-bars' role='img' aria-label='Post activity for the last seven days'>
-            {weeklyActivity.map(day => (
-              <div className='analytics-bar-column' key={day.date}>
-                <span className='analytics-count'>{day.count || ''}</span>
-                <div className='analytics-track'><div className='analytics-bar' style={{ height: `${Math.max(8, Math.round((day.count / maxWeeklyActivity) * 100))}%` }} /></div>
-                <span>{day.label}</span>
-              </div>
-            ))}
-          </div>
-          <div className='analytics-footer'>
-            <span><CircleCheckBig size={15} />{stats.posted} delivered</span>
-            <span><CalendarClock size={15} />{stats.scheduled} scheduled</span>
-            <span><CircleAlert size={15} />{stats.failed} exceptions</span>
-          </div>
-        </article>
-
-        <article className='report-panel schedule-watch-panel'>
-          <header className='panel-header'>
-            <div><p className='section-kicker'>Schedule watch</p><h2>Next actions</h2></div>
-            <CalendarDays size={20} />
-          </header>
-          <div className='schedule-watch-list'>
-            {upcoming.length === 0 ? <div className='panel-empty'>No scheduled posts</div> : upcoming.map(upload => (
-              <button key={upload.id} className='schedule-watch-row' onClick={() => onEdit(upload)}>
-                <CustomIcon platform={upload.platform} size={18} />
-                <span><strong>{upload.title || upload.originalName}</strong><small>{formatEventTime(upload.scheduledAt ?? upload.updatedAt)}</small></span>
-                <ChevronRight size={17} />
-              </button>
-            ))}
-          </div>
-        </article>
-      </section>
-
-      <section className='report-workspace'>
-        <article className='report-panel calendar-panel' id='calendar'>
-          <header className='panel-header calendar-panel-header'>
-            <div><p className='section-kicker'>Post calendar</p><h2>{monthLabel}</h2></div>
-            <div className='calendar-navigation'>
-              <button className='tool-icon-button' title='Previous month' onClick={() => shiftCalendarMonth(-1)}><ChevronLeft size={18} /></button>
-              <button className='tool-icon-button' title='Next month' onClick={() => shiftCalendarMonth(1)}><ChevronRight size={18} /></button>
-            </div>
-          </header>
-          <div className='calendar-workspace'>
-            <div className='calendar-grid' role='grid' aria-label={`Post calendar for ${monthLabel}`}>
-              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => <span className='calendar-weekday' key={day}>{day}</span>)}
-              {calendarDays.map(day => (
-                <button
-                  key={day.key}
-                  type='button'
-                  className={`calendar-day ${day.currentMonth ? '' : 'outside-month'} ${day.key === selectedDay ? 'selected-day' : ''} ${day.events.length ? 'has-events' : ''}`}
-                  onClick={() => setSelectedDay(day.key)}
-                  aria-label={`${formatCalendarHeading(day.key)}, ${day.events.length} events`}
-                >
-                  <span className='calendar-day-number'>{day.date.getDate()}</span>
-                  <span className='calendar-event-icons'>
-                    {day.events.slice(0, 3).map(upload => <CustomIcon key={upload.id} platform={upload.platform} size={14} />)}
-                    {day.events.length > 3 && <span className='calendar-more-events'>+{day.events.length - 3}</span>}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <aside className='calendar-detail' aria-live='polite'>
-              <div className='calendar-detail-title'><span>{formatCalendarHeading(selectedDay)}</span><strong>{selectedEvents.length}</strong></div>
-              <div className='calendar-detail-list'>
-                {selectedEvents.length === 0 ? <div className='panel-empty'>No posting activity</div> : selectedEvents.map(upload => (
-                  <div className='calendar-detail-row' key={upload.id}>
-                    <CustomIcon platform={upload.platform} size={18} />
-                    <div><strong>{upload.title || upload.originalName}</strong><small>{platformLabels[upload.platform]} · {getAuditAction(upload)}</small></div>
-                    <time>{new Date(getAuditTimestamp(upload)).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</time>
-                  </div>
-                ))}
-              </div>
-            </aside>
-          </div>
-        </article>
-
-        <article className='report-panel audit-panel' id='audit'>
-          <header className='panel-header audit-header'>
-            <div><p className='section-kicker'>Auditing and reports</p><h2>Post audit trail</h2></div>
-            <ListFilter size={20} />
-          </header>
-          <div className='audit-filters'>
-            <label><span>Platform</span><select value={platformFilter} onChange={event => setPlatformFilter(event.target.value as Platform | 'all')}><option value='all'>All platforms</option>{platforms.map(platform => <option key={platform} value={platform}>{platformLabels[platform]}</option>)}</select></label>
-            <label><span>Status</span><select value={statusFilter} onChange={event => setStatusFilter(event.target.value as PlatformUpload['status'] | 'all')}><option value='all'>All statuses</option><option value='posted'>Published</option><option value='queued'>Queued</option><option value='processing'>Processing</option><option value='failed'>Needs attention</option></select></label>
-          </div>
-          <div className='audit-list'>
-            {auditItems.length === 0 ? <div className='panel-empty'>No matching post events</div> : auditItems.map(upload => (
-              <div className='audit-row' key={upload.id}>
-                <div className={`audit-status audit-status-${upload.status}`}><CustomIcon platform={upload.platform} size={17} /></div>
-                <div className='audit-row-main'><strong>{upload.title || upload.originalName}</strong><span>{platformLabels[upload.platform]} · {getAuditAction(upload)}</span></div>
-                <div className='audit-row-time'><time>{formatEventTime(getAuditTimestamp(upload))}</time>{(upload.status === 'queued' || upload.status === 'failed') && <button title='Edit post details' onClick={() => onEdit(upload)}><Pencil size={14} /></button>}</div>
-              </div>
-            ))}
-          </div>
-        </article>
-      </section>
-
-      <section className='channel-metrics-section' id='folders' aria-labelledby='channel-metrics-title'>
-        <header className='section-header'><div><p className='section-kicker'>Post metrics</p><h2 id='channel-metrics-title'>Channel delivery health</h2></div><span>{folderConnections.length} folders connected</span></header>
-        <div className='channel-metrics-table'>
-          {platforms.map(platform => {
-            const channelPosts = uploads.filter(upload => upload.platform === platform);
-            const published = channelPosts.filter(upload => upload.status === 'posted').length;
-            const failed = channelPosts.filter(upload => upload.status === 'failed').length;
-            const completed = published + failed;
-            const delivery = completed ? Math.round((published / completed) * 100) : 0;
-            const connection = folderConnections.find(item => item.platform === platform);
-            return (
-              <button key={platform} className='channel-metric-row' onClick={() => onOpenFolder(platform)} title={`${connection ? 'Manage' : 'Connect'} ${platformLabels[platform]} folder`}>
-                <CustomIcon platform={platform} size={22} />
-                <span className='channel-metric-name'><strong>{platformLabels[platform]}</strong><small>{connection ? 'Folder connected' : 'Folder not connected'}</small></span>
-                <span><strong>{channelPosts.length}</strong><small>posts</small></span>
-                <span><strong>{published}</strong><small>published</small></span>
-                <span className={failed ? 'channel-attention' : ''}><strong>{failed}</strong><small>exceptions</small></span>
-                <span className='channel-delivery'><strong>{delivery}%</strong><small>delivery</small></span>
-                <FolderOpen size={18} />
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      {activeFolder && (
-        <FolderConnectionModal
-          platform={activeFolder!}
-          accounts={accounts.filter(item => item.platform === activeFolder!)}
-          connections={folderConnections.filter(item => item.platform === activeFolder!)}
-          uploads={uploads.filter(item => item.platform === activeFolder!)}
-          onEdit={onEdit}
-          onClose={onCloseFolder}
-          onSuccess={onRefresh}
-        />
-      )}
-      {editingUpload && <EditPostModal upload={editingUpload!} accounts={accounts.filter(item => item.platform === editingUpload!.platform)} onClose={onCloseEdit} onSuccess={onRefresh} />}
-      </section>
-    </main>
-  );
-}
-
 function Workboard({
   role,
   uploads,
   accounts,
+  schedules,
   folderConnections,
   loading,
   error,
@@ -907,6 +335,7 @@ function Workboard({
   onRefresh,
   onSignOut,
   onOpenFolder,
+  onOpenSchedules,
   onEdit,
   activeFolder,
   editingUpload,
@@ -916,6 +345,7 @@ function Workboard({
   role: UserRole;
   uploads: PlatformUpload[];
   accounts: PlatformAccount[];
+  schedules: PublishingSchedule[];
   folderConnections: FolderConnection[];
   loading: boolean;
   error: string | null;
@@ -924,6 +354,7 @@ function Workboard({
   onRefresh: () => void;
   onSignOut: () => void;
   onOpenFolder: (platform: Platform) => void;
+  onOpenSchedules: () => void;
   onEdit: (upload: PlatformUpload) => void;
   activeFolder: Platform | null;
   editingUpload: PlatformUpload | null;
@@ -1053,7 +484,7 @@ function Workboard({
         <div className='operations-hero-copy'><p className='section-kicker'>Publishing command center</p><h1>Control every post.<br />Across every channel.</h1><span>Review content, manage delivery status, and coordinate your publishing calendar from one operational workspace.</span></div>
         <div className='operations-hero-stats'>
           <article><span>Tracked content</span><strong>{metrics.total}</strong><small>Across the workspace</small></article>
-          <article><span>Publishing accounts</span><strong>{accounts.length}</strong><small>{folderConnections.length} media folders online</small></article>
+          <article><span>Publishing accounts</span><strong>{accounts.length}</strong><small>{schedules.length} reusable schedules</small></article>
           <article><span>Open reviews</span><strong>{reviewQueue.length}</strong><small>Require attention</small></article>
           <article><span>Automation</span><strong className='automation-state'>{isRunning ? 'Running' : 'Ready'}</strong><small>{isRunning ? 'Publishing now' : 'Standing by'}</small></article>
         </div>
@@ -1072,6 +503,25 @@ function Workboard({
                 <div className='platform-account-summary'><UsersRound size={13} /><span>{platformAccounts.length} {platformAccounts.length === 1 ? 'account' : 'accounts'}</span></div>
               </button>
             );
+          })}
+        </div>
+      </section>
+
+      <section className='workboard-schedule-manager' aria-labelledby='schedule-manager-heading'>
+        <header className='workboard-section-head'>
+          <div><p className='section-kicker'>Reusable timing</p><h2 id='schedule-manager-heading'>Schedule manager</h2></div>
+          <button className='btn-primary' onClick={onOpenSchedules}><CalendarClock size={16} />Add or manage</button>
+        </header>
+        <div className='schedule-card-grid'>
+          {schedules.length === 0 ? <button className='schedule-empty-card' onClick={onOpenSchedules}><CalendarClock size={24} /><span><strong>No schedules yet</strong><small>Create schedules like Daily, Weekly, Monthly, One time, or Custom.</small></span><ChevronRight size={18} /></button> : schedules.map(schedule => {
+            const assignedPosts = uploads.filter(upload => upload.scheduleId === schedule.id).length;
+            return <button className='schedule-summary-card' key={schedule.id} onClick={onOpenSchedules}>
+              <span className='schedule-card-id'>#{schedule.id}</span>
+              <span className='schedule-card-main'><strong>{schedule.name}</strong><small>{schedule.frequency === 'custom' ? schedule.customCronExpression : `${scheduleFrequencyLabels[schedule.frequency]} at ${schedule.time}`}{schedule.endDate ? ` until ${schedule.endDate}` : ''}</small></span>
+              <span className={`schedule-card-state ${schedule.status}`}>{schedule.status}</span>
+              <span className='schedule-card-accounts'><FileText size={14} />{assignedPosts}</span>
+              <ChevronRight size={17} />
+            </button>;
           })}
         </div>
       </section>
@@ -1162,16 +612,17 @@ function Workboard({
         </article>
       </section>
 
-      {activeFolder && <FolderConnectionModal platform={activeFolder} accounts={accounts.filter(item => item.platform === activeFolder)} connections={folderConnections.filter(item => item.platform === activeFolder)} uploads={uploads.filter(item => item.platform === activeFolder)} onEdit={onEdit} onClose={onCloseFolder} onSuccess={onRefresh} />}
-      {editingUpload && <EditPostModal upload={editingUpload} accounts={accounts.filter(item => item.platform === editingUpload.platform)} onClose={onCloseEdit} onSuccess={onRefresh} />}
+      {activeFolder && <FolderConnectionModal platform={activeFolder} accounts={accounts.filter(item => item.platform === activeFolder)} schedules={schedules} connections={folderConnections.filter(item => item.platform === activeFolder)} uploads={uploads.filter(item => item.platform === activeFolder)} onEdit={onEdit} onClose={onCloseFolder} onSuccess={onRefresh} />}
+      {editingUpload && <EditPostModal upload={editingUpload} accounts={accounts.filter(item => item.platform === editingUpload.platform)} schedules={schedules} onClose={onCloseEdit} onSuccess={onRefresh} />}
       </section>
     </main>
   );
 }
 
-function FolderConnectionModal({ platform, accounts, connections, uploads, onEdit, onClose, onSuccess }: {
+function FolderConnectionModal({ platform, accounts, schedules, connections, uploads, onEdit, onClose, onSuccess }: {
   platform: Platform;
   accounts: PlatformAccount[];
+  schedules: PublishingSchedule[];
   connections: FolderConnection[];
   uploads: PlatformUpload[];
   onEdit: (upload: PlatformUpload) => void;
@@ -1297,7 +748,10 @@ function FolderConnectionModal({ platform, accounts, connections, uploads, onEdi
           </section>
           <section className='folder-posts'>
             <div className='folder-posts-head'><strong>Posts assigned to this account</strong><span>{accountUploads.length}</span></div>
-            {accountUploads.length === 0 ? <div className='folder-posts-empty'>No posts assigned yet</div> : accountUploads.map(upload => <button className='folder-post-row' key={upload.id} onClick={() => onEdit(upload)}><FileText size={18} /><span className='folder-post-name'>{upload.folderSource?.relativePath ?? upload.originalName}</span><span className='folder-post-schedule'>{upload.status === 'posted' ? 'Published' : upload.scheduledAt ? new Date(upload.scheduledAt).toLocaleString() : 'Needs schedule'}</span><CalendarClock size={16} /></button>)}
+            {accountUploads.length === 0 ? <div className='folder-posts-empty'>No posts assigned yet</div> : accountUploads.map(upload => {
+              const uploadSchedule = upload.scheduleId ? schedules.find(schedule => schedule.id === upload.scheduleId) : undefined;
+              return <button className='folder-post-row' key={upload.id} onClick={() => onEdit(upload)}><FileText size={18} /><span className='folder-post-name'>{upload.folderSource?.relativePath ?? upload.originalName}</span><span className='folder-post-schedule'>{upload.status === 'posted' ? 'Published' : upload.scheduledAt ? new Date(upload.scheduledAt).toLocaleString() : uploadSchedule ? uploadSchedule.name : 'Needs schedule'}</span><CalendarClock size={16} /></button>;
+            })}
           </section>
           <div className='account-danger-actions'>{connection && <button className='btn-danger' onClick={disconnect} disabled={loading}><Unplug size={15} />Disconnect folder</button>}<button className='btn-danger ghost-danger' onClick={removeAccount} disabled={loading || Boolean(connection) || accountUploads.length > 0}><Trash2 size={15} />Delete account</button></div>
         </div> : <div className='account-list-view'>
@@ -1307,6 +761,118 @@ function FolderConnectionModal({ platform, accounts, connections, uploads, onEdi
             const accountConnection = connections.find(item => item.accountId === account.id);
             return <button className='publishing-account-row' key={account.id} onClick={() => setSelectedId(account.id)}><span className='publishing-account-icon'><CustomIcon platform={platform} size={28} /><i className={account.enabled ? 'online' : ''} /></span><span className='publishing-account-identity'><strong>{account.displayName}</strong><small>{account.handle}</small></span><span className='publishing-account-metric'><strong>{items.length}</strong><small>posts</small></span><span className='publishing-account-metric published'><strong>{items.filter(item => item.status === 'posted').length}</strong><small>published</small></span><span className={`publishing-account-source ${accountConnection ? 'connected' : ''}`}><FolderOpen size={15} />{accountConnection ? 'Folder connected' : 'Connect folder'}</span><ChevronRight size={18} /></button>;
           })}</div>
+        </div>}
+      </div>
+    </div>
+  </div>;
+}
+
+function ScheduleManagerModal({ schedules, uploads, onClose, onSuccess }: {
+  schedules: PublishingSchedule[];
+  uploads: PlatformUpload[];
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [editing, setEditing] = useState<PublishingSchedule | 'new' | null>(schedules.length === 0 ? 'new' : null);
+  const [name, setName] = useState('');
+  const [time, setTime] = useState('09:00');
+  const [frequency, setFrequency] = useState<ScheduleFrequency>('daily');
+  const [endDate, setEndDate] = useState('');
+  const [status, setStatus] = useState<ScheduleStatus>('active');
+  const [customCronExpression, setCustomCronExpression] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const openForm = (schedule?: PublishingSchedule) => {
+    setEditing(schedule ?? 'new');
+    setName(schedule?.name ?? '');
+    setTime(schedule?.time ?? '09:00');
+    setFrequency(schedule?.frequency ?? 'daily');
+    setEndDate(schedule?.endDate ?? '');
+    setStatus(schedule?.status ?? 'active');
+    setCustomCronExpression(schedule?.customCronExpression ?? '');
+  };
+
+  const closeForm = () => {
+    setEditing(null);
+    setName('');
+    setTime('09:00');
+    setFrequency('daily');
+    setEndDate('');
+    setStatus('active');
+    setCustomCronExpression('');
+  };
+
+  const saveSchedule = async () => {
+    if (!name.trim()) return alert('Schedule name is required.');
+    if (!time) return alert('Schedule time is required.');
+    if (frequency === 'onetime' && !endDate) return alert('One-time schedules need a date.');
+    if (frequency === 'custom' && !customCronExpression.trim()) return alert('Custom schedules need a cron expression.');
+    setLoading(true);
+    try {
+      const payload = {
+        name: name.trim(),
+        time,
+        frequency,
+        endDate: endDate || undefined,
+        status,
+        customCronExpression: frequency === 'custom' ? customCronExpression.trim() : undefined
+      };
+      if (editing === 'new') await api.createSchedule(payload);
+      else await api.updateSchedule(editing!.id, payload);
+      closeForm();
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not save schedule'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeSchedule = async (schedule: PublishingSchedule) => {
+    const postCount = uploads.filter(upload => upload.scheduleId === schedule.id).length;
+    if (postCount > 0) return alert('Remove this schedule from posts before deleting it.');
+    if (!confirm(`Delete schedule ${schedule.name}?`)) return;
+    setLoading(true);
+    try {
+      await api.deleteSchedule(schedule.id);
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not delete schedule'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <div className='modal-overlay' onClick={onClose}>
+    <div className='modal-panel schedule-manager-modal' onClick={event => event.stopPropagation()}>
+      <div className='modal-head'><span>Schedule manager</span><button onClick={onClose}><X size={22} /></button></div>
+      <div className='modal-body'>
+        {editing ? <div className='schedule-form'>
+          <div className='account-form-heading'><CalendarClock size={34} /><div><strong>{editing === 'new' ? 'Add schedule' : 'Edit schedule'}</strong><span>Create one reusable schedule and assign it to posts.</span></div></div>
+          <div className='account-form-grid'>
+            <div className='field'><label>Schedule name</label><input value={name} onChange={event => setName(event.target.value)} placeholder='Morning daily' /></div>
+            <div className='field'><label>Time 24HH-MI</label><input type='time' value={time} onChange={event => setTime(event.target.value)} /></div>
+            <div className='field'><label>Frequency</label><select value={frequency} onChange={event => setFrequency(event.target.value as ScheduleFrequency)}>{scheduleFrequencies.map(item => <option key={item} value={item}>{scheduleFrequencyLabels[item]}</option>)}</select></div>
+            <div className='field'><label>{frequency === 'onetime' ? 'Schedule date' : 'Schedule end date'}</label><input type='date' value={endDate} onChange={event => setEndDate(event.target.value)} /></div>
+            <div className='field'><label>Status</label><select value={status} onChange={event => setStatus(event.target.value as ScheduleStatus)}><option value='active'>Active</option><option value='inactive'>Inactive</option></select></div>
+            {frequency === 'custom' && <div className='field'><label>Custom cron</label><input value={customCronExpression} onChange={event => setCustomCronExpression(event.target.value)} placeholder='30 9 * * 1-5' /></div>}
+          </div>
+          <div className='account-form-actions'><button className='btn-outline' onClick={closeForm}>Cancel</button><button className='btn-primary' onClick={saveSchedule} disabled={loading}>{loading ? <Loader2 className='spin' size={17} /> : <ShieldCheck size={17} />}Save schedule</button></div>
+        </div> : <div className='schedule-list-view'>
+          <div className='account-list-intro'><div><strong>{schedules.length} reusable {schedules.length === 1 ? 'schedule' : 'schedules'}</strong><span>Assign schedules from each post edit form.</span></div><button className='btn-primary' onClick={() => openForm()}><CalendarClock size={16} />Add schedule</button></div>
+          <div className='schedule-list'>
+            {schedules.length === 0 ? <div className='account-list-empty'><CalendarClock size={27} /><strong>No schedules yet</strong><span>Add a schedule, then select it from any post.</span><button className='btn-primary' onClick={() => openForm()}>Add first schedule</button></div> : schedules.map(schedule => {
+              const postCount = uploads.filter(upload => upload.scheduleId === schedule.id).length;
+              return <article className='schedule-row' key={schedule.id}>
+                <div className='schedule-row-id'>#{schedule.id}</div>
+                <div className='schedule-row-main'><strong>{schedule.name}</strong><small>{schedule.frequency === 'custom' ? schedule.customCronExpression : `${scheduleFrequencyLabels[schedule.frequency]} at ${schedule.time}`}{schedule.endDate ? ` - ends ${schedule.endDate}` : ''}</small></div>
+                <span className={`schedule-status ${schedule.status}`}>{schedule.status}</span>
+                <span className='schedule-account-count'><FileText size={14} />{postCount}</span>
+                <button className='btn-outline' onClick={() => openForm(schedule)}><Pencil size={14} />Edit</button>
+                <button className='btn-danger ghost-danger' onClick={() => removeSchedule(schedule)} disabled={loading || postCount > 0}><Trash2 size={14} /></button>
+              </article>;
+            })}
+          </div>
         </div>}
       </div>
     </div>
@@ -1413,17 +979,21 @@ function NetworkPostPreview({
 function EditPostModal({
   upload,
   accounts,
+  schedules,
   onClose,
   onSuccess,
 }: {
   upload: PlatformUpload;
   accounts: PlatformAccount[];
+  schedules: PublishingSchedule[];
   onClose: () => void;
   onSuccess: () => void;
 }) {
   const [title, setTitle] = useState(upload.title ?? upload.caption);
   const [caption, setCaption] = useState(upload.caption);
   const [accountId, setAccountId] = useState(upload.accountId);
+  const [scheduleMode, setScheduleMode] = useState<'none' | 'exact' | 'template'>(upload.scheduleId ? 'template' : upload.scheduledAt ? 'exact' : 'none');
+  const [scheduleId, setScheduleId] = useState<number | ''>(upload.scheduleId ?? '');
   const [schedule, setSchedule] = useState(
     upload.scheduledAt ? toLocalDateTimeInputValue(new Date(upload.scheduledAt)) : "",
   );
@@ -1435,8 +1005,10 @@ function EditPostModal({
     if (!caption.trim()) return alert("Caption is required");
     if (isYouTube && !title.trim()) return alert("Video title is required");
 
-    const scheduledDate = schedule ? new Date(schedule) : null;
-    if (upload.folderSource && !scheduledDate) return alert("Choose a schedule for this folder post");
+    const scheduledDate = scheduleMode === 'exact' && schedule ? new Date(schedule) : null;
+    if (upload.folderSource && scheduleMode === 'none') return alert("Choose a schedule for this folder post");
+    if (scheduleMode === 'exact' && !scheduledDate) return alert("Choose a scheduled date and time.");
+    if (scheduleMode === 'template' && !scheduleId) return alert("Choose a schedule template.");
     if (scheduledDate && (!Number.isFinite(scheduledDate.getTime()) || scheduledDate.getTime() <= Date.now())) {
       return alert("Choose a scheduled date and time in the future");
     }
@@ -1446,7 +1018,8 @@ function EditPostModal({
       await api.updateUploadDetails(upload.id, {
         title: isYouTube ? title.trim() : undefined,
         caption: caption.trim(),
-        scheduledAt: scheduledDate?.toISOString() ?? null,
+        scheduledAt: scheduleMode === 'exact' ? scheduledDate?.toISOString() ?? null : null,
+        scheduleId: scheduleMode === 'template' ? Number(scheduleId) : null,
         accountId,
       });
       onSuccess();
@@ -1478,9 +1051,25 @@ function EditPostModal({
                 <textarea rows={5} value={caption} onChange={event => setCaption(event.target.value)} />
               </div>
               <div className="field">
+                <label>Schedule option</label>
+                <select value={scheduleMode} onChange={event => setScheduleMode(event.target.value as 'none' | 'exact' | 'template')}>
+                  <option value='none'>No schedule yet</option>
+                  <option value='exact'>Exact date and time</option>
+                  <option value='template'>Use schedule template</option>
+                </select>
+              </div>
+              {scheduleMode === 'exact' && <div className="field">
                 <label>Scheduled date and time</label>
                 <input type="datetime-local" min={minimumSchedule} value={schedule} onChange={event => setSchedule(event.target.value)} />
-              </div>
+              </div>}
+              {scheduleMode === 'template' && <div className="field">
+                <label>Schedule template</label>
+                <select value={scheduleId} onChange={event => setScheduleId(event.target.value ? Number(event.target.value) : '')}>
+                  <option value=''>Choose schedule</option>
+                  {schedules.map(scheduleItem => <option key={scheduleItem.id} value={scheduleItem.id}>#{scheduleItem.id} {scheduleItem.name} - {scheduleFrequencyLabels[scheduleItem.frequency]} at {scheduleItem.time}{scheduleItem.status === 'inactive' ? ' (inactive)' : ''}</option>)}
+                </select>
+                <small className='field-help'>This applies only to this post.</small>
+              </div>}
             </div>
             <NetworkPostPreview upload={upload} account={accounts.find(account => account.id === accountId)} title={title} caption={caption} />
           </div>

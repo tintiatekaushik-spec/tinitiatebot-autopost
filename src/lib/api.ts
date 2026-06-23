@@ -5,9 +5,12 @@ import type {
   Platform,
   PlatformAccount,
   PlatformUpload,
+  PublishingSchedule,
+  SocialMediaSchedule,
   UpdateUploadDetailsInput,
   UpdateUploadStatusInput,
-  UpsertPlatformAccountInput
+  UpsertPlatformAccountInput,
+  UpsertPublishingScheduleInput
 } from "../../shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -65,6 +68,19 @@ export const api = {
   folderConnections: () => request<FolderConnection[]>("/api/folder-connections"),
 
   accounts: (platform?: Platform) => request<PlatformAccount[]>(`/api/accounts${platform ? `?platform=${platform}` : ""}`),
+
+  schedules: () => request<PublishingSchedule[]>("/api/schedules"),
+
+  socialMediaSchedules: () => request<SocialMediaSchedule[]>("/api/social-media-schedules"),
+
+  createSchedule: (payload: UpsertPublishingScheduleInput) =>
+    request<PublishingSchedule>("/api/schedules", { method: "POST", body: JSON.stringify(payload) }),
+
+  updateSchedule: (scheduleId: number, payload: UpsertPublishingScheduleInput) =>
+    request<PublishingSchedule>(`/api/schedules/${scheduleId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+
+  deleteSchedule: (scheduleId: number) =>
+    request<void>(`/api/schedules/${scheduleId}`, { method: "DELETE" }),
 
   createAccount: (platform: Platform, payload: UpsertPlatformAccountInput) =>
     request<PlatformAccount>(`/api/platforms/${platform}/accounts`, { method: "POST", body: JSON.stringify(payload) }),

@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
+import nodeCron from "node-cron";
 import {
   type AutomationInput,
   type DashboardSummary,
@@ -10,9 +11,12 @@ import {
   type Platform,
   type PlatformAccount,
   type PlatformUpload,
+  type PublishingSchedule,
+  type SocialMediaSchedule,
   type UpdateUploadDetailsInput,
   type UploadStatus,
   type UpsertPlatformAccountInput,
+  type UpsertPublishingScheduleInput,
   platformHandles,
   platformLabels,
   platformSurfaces,
@@ -22,9 +26,11 @@ import {
 type AccountSecret = { encryptedPassword?: string; password?: string };
 
 type Store = {
-  version: 2;
+  version: 3;
   accounts: PlatformAccount[];
   accountSecrets: Record<string, AccountSecret>;
+  schedules: PublishingSchedule[];
+  socialMediaSchedules: SocialMediaSchedule[];
   uploads: PlatformUpload[];
   folderConnections: FolderConnection[];
 };
@@ -38,6 +44,7 @@ type StoredFileInput = {
   title?: string;
   caption: string;
   scheduledAt?: string;
+  scheduleId?: number;
   folderSource?: PlatformUpload["folderSource"];
 };
 
@@ -55,7 +62,7 @@ function resolveFromRoot(candidate: string) {
 }
 
 function emptyStore(): Store {
-  return { version: 2, accounts: [], accountSecrets: {}, uploads: [], folderConnections: [] };
+  return { version: 3, accounts: [], accountSecrets: {}, schedules: [], socialMediaSchedules: [], uploads: [], folderConnections: [] };
 }
 
 function nowIso() {
@@ -127,10 +134,37 @@ function createAutomation(platform: Platform, accountId: string, uploadId: strin
   };
 }
 
+function normalizeEndDate(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function nextNumericId(items: Array<{ id: number }>) {
+  return items.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+}
+
+function validateScheduleInput(input: UpsertPublishingScheduleInput) {
+  if (input.frequency === "custom" && input.customCronExpression && !nodeCron.validate(input.customCronExpression)) {
+    throw new Error("Custom schedule cron expression is invalid.");
+  }
+  if (input.frequency === "onetime" && !normalizeEndDate(input.endDate)) {
+    throw new Error("One-time schedules need a schedule date.");
+  }
+}
+
+function normalizeScheduleId(value: unknown) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const scheduleId = Number(value);
+  if (!Number.isInteger(scheduleId) || scheduleId <= 0) throw new Error("Selected schedule is invalid.");
+  return scheduleId;
+}
+
 function migrateStore(parsed: any): Store {
   if (!Array.isArray(parsed?.uploads)) return emptyStore();
 
   const accounts: PlatformAccount[] = Array.isArray(parsed.accounts) ? parsed.accounts : [];
+  const schedules = (Array.isArray(parsed.schedules) ? parsed.schedules : []) as PublishingSchedule[];
+  const socialMediaSchedules = (Array.isArray(parsed.socialMediaSchedules) ? parsed.socialMediaSchedules : []) as SocialMediaSchedule[];
   const uploads = parsed.uploads as Array<PlatformUpload & { accountId?: string }>;
   const folderConnections = (Array.isArray(parsed.folderConnections) ? parsed.folderConnections : []) as Array<FolderConnection & { accountId?: string }>;
   const legacyPlatforms = new Set<Platform>();
@@ -155,13 +189,17 @@ function migrateStore(parsed: any): Store {
     accountId: connection.accountId || primaryId(connection.platform)
   })) as FolderConnection[];
 
-  return {
-    version: 2,
+  const store: Store = {
+    version: 3,
     accounts,
     accountSecrets: parsed.accountSecrets && typeof parsed.accountSecrets === "object" ? parsed.accountSecrets : {},
+    schedules,
+    socialMediaSchedules,
     uploads: migratedUploads,
     folderConnections: migratedConnections
   };
+
+  return store;
 }
 
 async function ensureStore() {
@@ -178,7 +216,7 @@ async function readStore(): Promise<Store> {
   const raw = await fs.readFile(dataFile, "utf8");
   const parsed = JSON.parse(raw);
   const store = migrateStore(parsed);
-  if (parsed.version !== 2) await writeStore(store);
+  if (parsed.version !== 3) await writeStore(store);
   return store;
 }
 
@@ -291,16 +329,252 @@ export async function deletePlatformAccount(accountId: string) {
     if (store.folderConnections.some(connection => connection.accountId === accountId)) throw new Error("Disconnect this account's folder before deleting it.");
     if (store.uploads.some(upload => upload.accountId === accountId)) throw new Error("This account has post history and cannot be deleted. Disable it instead.");
     store.accounts = store.accounts.filter(account => account.id !== accountId);
+    store.socialMediaSchedules = store.socialMediaSchedules.filter(item => item.accountId !== accountId);
     delete store.accountSecrets[accountId];
     return existing;
   });
 }
 
+export async function listPublishingSchedules() {
+  const store = await readStore();
+  return [...store.schedules].sort((a, b) => a.id - b.id);
+}
+
+export async function listSocialMediaSchedules() {
+  const store = await readStore();
+  return store.uploads
+    .filter(upload => upload.scheduleId)
+    .map((upload, index) => ({
+      id: index + 1,
+      scheduleId: upload.scheduleId!,
+      accountId: upload.accountId,
+      platform: upload.platform,
+      createdAt: upload.uploadedAt,
+      updatedAt: upload.updatedAt
+    }))
+    .sort((a, b) => a.id - b.id);
+}
+
+export async function createPublishingSchedule(input: UpsertPublishingScheduleInput) {
+  validateScheduleInput(input);
+  return mutateStore(store => {
+    const timestamp = nowIso();
+    const schedule: PublishingSchedule = {
+      id: nextNumericId(store.schedules),
+      name: input.name.trim(),
+      time: input.time,
+      frequency: input.frequency,
+      endDate: normalizeEndDate(input.endDate),
+      status: input.status ?? "active",
+      customCronExpression: input.frequency === "custom" ? input.customCronExpression?.trim() : undefined,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    store.schedules.push(schedule);
+    return schedule;
+  });
+}
+
+export async function updatePublishingSchedule(scheduleId: number, input: UpsertPublishingScheduleInput) {
+  validateScheduleInput(input);
+  return mutateStore(store => {
+    const index = store.schedules.findIndex(schedule => schedule.id === scheduleId);
+    if (index === -1) return null;
+    const existing = store.schedules[index];
+    const updated: PublishingSchedule = {
+      ...existing,
+      name: input.name.trim(),
+      time: input.time,
+      frequency: input.frequency,
+      endDate: normalizeEndDate(input.endDate),
+      status: input.status ?? existing.status,
+      customCronExpression: input.frequency === "custom" ? input.customCronExpression?.trim() : undefined,
+      updatedAt: nowIso()
+    };
+    store.schedules[index] = updated;
+    return updated;
+  });
+}
+
+export async function deletePublishingSchedule(scheduleId: number) {
+  return mutateStore(store => {
+    const existing = store.schedules.find(schedule => schedule.id === scheduleId);
+    if (!existing) return null;
+    if (store.uploads.some(upload => upload.scheduleId === scheduleId)) {
+      throw new Error("Remove this schedule from posts before deleting it.");
+    }
+    store.schedules = store.schedules.filter(schedule => schedule.id !== scheduleId);
+    store.socialMediaSchedules = store.socialMediaSchedules.filter(item => item.scheduleId !== scheduleId);
+    return existing;
+  });
+}
+
+function localDateAt(date: Date, time: string) {
+  const [hour, minute] = time.split(":").map(Number);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), hour, minute, 0, 0);
+}
+
+function endOfLocalDate(dateValue?: string) {
+  if (!dateValue) return null;
+  const [year, month, day] = dateValue.split("-").map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(year, month - 1, day, 23, 59, 59, 999);
+}
+
+function localDateFromValue(dateValue?: string) {
+  if (!dateValue) return null;
+  const [year, month, day] = dateValue.split("-").map(Number);
+  if (!year || !month || !day) return null;
+  return new Date(year, month - 1, day);
+}
+
+function daysBetween(start: Date, end: Date) {
+  const startDay = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+  const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+  return Math.floor((endDay - startDay) / 86_400_000);
+}
+
+function lastDayOfMonth(year: number, month: number) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
+function scheduleDateInMonth(year: number, month: number, anchorDay: number, time: string) {
+  const day = Math.min(anchorDay, lastDayOfMonth(year, month));
+  return localDateAt(new Date(year, month, day), time);
+}
+
+function previousScheduleOccurrence(schedule: PublishingSchedule, now: Date) {
+  const createdAt = new Date(schedule.createdAt);
+  const anchor = Number.isFinite(createdAt.getTime()) ? createdAt : now;
+
+  if (schedule.frequency === "custom") {
+    if (!schedule.customCronExpression || !nodeCron.validate(schedule.customCronExpression)) return null;
+    const currentMinute = new Date(now);
+    currentMinute.setSeconds(0, 0);
+    const task = nodeCron.createTask(schedule.customCronExpression, () => undefined);
+    try {
+      return task.match(currentMinute) ? currentMinute : null;
+    } finally {
+      void task.destroy();
+    }
+  }
+
+  if (schedule.frequency === "onetime") {
+    const runDate = localDateFromValue(schedule.endDate);
+    if (!runDate) return null;
+    const occurrence = localDateAt(runDate, schedule.time);
+    return occurrence.getTime() <= now.getTime() ? occurrence : null;
+  }
+
+  if (schedule.frequency === "daily") {
+    const today = localDateAt(now, schedule.time);
+    if (today.getTime() <= now.getTime()) return today;
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    return localDateAt(yesterday, schedule.time);
+  }
+
+  if (schedule.frequency === "weekly") {
+    const dayDiff = (now.getDay() - anchor.getDay() + 7) % 7;
+    const candidateDay = new Date(now);
+    candidateDay.setDate(candidateDay.getDate() - dayDiff);
+    const candidate = localDateAt(candidateDay, schedule.time);
+    if (candidate.getTime() <= now.getTime()) return candidate;
+    candidateDay.setDate(candidateDay.getDate() - 7);
+    return localDateAt(candidateDay, schedule.time);
+  }
+
+  if (schedule.frequency === "biweekly") {
+    const elapsedDays = Math.max(0, daysBetween(anchor, now));
+    const cycleStart = elapsedDays - (elapsedDays % 14);
+    const candidateDay = new Date(anchor);
+    candidateDay.setDate(candidateDay.getDate() + cycleStart);
+    const candidate = localDateAt(candidateDay, schedule.time);
+    if (candidate.getTime() <= now.getTime()) return candidate;
+    candidateDay.setDate(candidateDay.getDate() - 14);
+    return localDateAt(candidateDay, schedule.time);
+  }
+
+  if (schedule.frequency === "monthly") {
+    const candidate = scheduleDateInMonth(now.getFullYear(), now.getMonth(), anchor.getDate(), schedule.time);
+    if (candidate.getTime() <= now.getTime()) return candidate;
+    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return scheduleDateInMonth(previousMonth.getFullYear(), previousMonth.getMonth(), anchor.getDate(), schedule.time);
+  }
+
+  const candidate = scheduleDateInMonth(now.getFullYear(), anchor.getMonth(), anchor.getDate(), schedule.time);
+  if (candidate.getTime() <= now.getTime()) return candidate;
+  return scheduleDateInMonth(now.getFullYear() - 1, anchor.getMonth(), anchor.getDate(), schedule.time);
+}
+
+function isScheduleDue(schedule: PublishingSchedule, now = new Date()) {
+  if (schedule.status !== "active") return false;
+  const occurrence = previousScheduleOccurrence(schedule, now);
+  if (!occurrence) return false;
+
+  const endAt = endOfLocalDate(schedule.endDate);
+  if (endAt && occurrence.getTime() > endAt.getTime()) return false;
+
+  const lastRunAt = schedule.lastRunAt ? Date.parse(schedule.lastRunAt) : null;
+  return !lastRunAt || !Number.isFinite(lastRunAt) || occurrence.getTime() > lastRunAt;
+}
+
+function dueScheduleIds(store: Store, now = new Date()) {
+  return new Set(store.schedules.filter(schedule => isScheduleDue(schedule, now)).map(schedule => schedule.id));
+}
+
+function isDueByPostSchedule(upload: PlatformUpload, account: PlatformAccount | undefined, dueIds: Set<number>) {
+  if (!account?.enabled || !upload.scheduleId) return false;
+  if (upload.status !== "queued" || upload.scheduledAt) return false;
+  return dueIds.has(upload.scheduleId);
+}
+
+function isStoreUploadReadyForAutomation(store: Store, upload: PlatformUpload, mode: AutomationInputMode, now = Date.now(), scheduledIds = dueScheduleIds(store, new Date(now))) {
+  const account = store.accounts.find(item => item.id === upload.accountId);
+  if (!account?.enabled) return false;
+  if (upload.scheduleId) {
+    return isDueByPostSchedule(upload, account, scheduledIds);
+  }
+  if (mode === "scheduledOnly") {
+    return isDueScheduledUpload(upload, now);
+  }
+  return isUploadReadyForAutomation(upload, now);
+}
+
+export async function listDueScheduleIdsWithQueuedUploads() {
+  const store = await readStore();
+  const dueIds = dueScheduleIds(store);
+  const accountById = new Map(store.accounts.map(account => [account.id, account]));
+  const ids = new Set<number>();
+  for (const upload of store.uploads) {
+    const account = accountById.get(upload.accountId);
+    if (upload.scheduleId && isDueByPostSchedule(upload, account, dueIds)) ids.add(upload.scheduleId);
+  }
+  return [...ids];
+}
+
+export async function markSchedulesTriggered(scheduleIds: number[], triggeredAt = nowIso()) {
+  if (scheduleIds.length === 0) return [];
+  const uniqueIds = new Set(scheduleIds);
+  return mutateStore(store => {
+    const updated: PublishingSchedule[] = [];
+    store.schedules = store.schedules.map(schedule => {
+      if (!uniqueIds.has(schedule.id)) return schedule;
+      const nextSchedule = { ...schedule, lastRunAt: triggeredAt, updatedAt: triggeredAt };
+      updated.push(nextSchedule);
+      return nextSchedule;
+    });
+    return updated;
+  });
+}
+
 export async function dashboardSummary(): Promise<DashboardSummary> {
-  const uploads = await listUploads();
+  const store = await readStore();
+  const uploads = [...store.uploads].sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+  const scheduledIds = dueScheduleIds(store);
   return {
     totalUploads: uploads.length,
-    readyForAutomation: uploads.filter(upload => isUploadReadyForAutomation(upload)).length,
+    readyForAutomation: uploads.filter(upload => isStoreUploadReadyForAutomation(store, upload, "ready", Date.now(), scheduledIds)).length,
     processing: uploads.filter(upload => upload.status === "processing").length,
     posted: uploads.filter(upload => upload.status === "posted").length,
     failed: uploads.filter(upload => upload.status === "failed").length,
@@ -349,6 +623,7 @@ export async function createUpload(accountId: string, file: StoredFileInput) {
       uploadedAt: timestamp,
       updatedAt: timestamp,
       scheduledAt: file.scheduledAt || undefined,
+      scheduleId: file.scheduleId,
       folderSource: file.folderSource,
       automation: createAutomation(account.platform, accountId, id, file.url)
     };
@@ -377,6 +652,7 @@ export async function deleteUpload(uploadId: string) {
 }
 
 export async function updateUploadDetails(uploadId: string, input: UpdateUploadDetailsInput) {
+  const selectedScheduleId = input.scheduleId === null ? undefined : normalizeScheduleId(input.scheduleId);
   return mutateStore(store => {
     const index = store.uploads.findIndex(upload => upload.id === uploadId);
     if (index === -1) return null;
@@ -390,12 +666,18 @@ export async function updateUploadDetails(uploadId: string, input: UpdateUploadD
       if (!account.enabled) throw new Error("Choose an enabled publishing account.");
       accountId = account.id;
     }
+    if (selectedScheduleId && !store.schedules.some(schedule => schedule.id === selectedScheduleId)) {
+      throw new Error("Selected schedule was not found.");
+    }
+    const nextScheduledAt = input.scheduledAt === null || selectedScheduleId ? undefined : input.scheduledAt ?? existing.scheduledAt;
+    const nextScheduleId = input.scheduledAt ? undefined : input.scheduleId === undefined ? existing.scheduleId : selectedScheduleId;
     const updated: PlatformUpload = {
       ...existing,
       accountId,
       title: input.title?.trim() || input.caption.trim(),
       caption: input.caption.trim(),
-      scheduledAt: input.scheduledAt === null ? undefined : input.scheduledAt ?? existing.scheduledAt,
+      scheduledAt: nextScheduledAt,
+      scheduleId: nextScheduleId,
       status: "queued",
       updatedAt: nowIso(),
       automation: createAutomation(existing.platform, accountId, existing.id, existing.url)
@@ -490,15 +772,20 @@ export async function updateFolderUploadFile(uploadId: string, input: { original
 }
 
 export async function listDueScheduledUploads() {
-  const uploads = await listUploads();
-  return uploads.filter(upload => isDueScheduledUpload(upload));
+  const store = await readStore();
+  const scheduledIds = dueScheduleIds(store);
+  return store.uploads
+    .filter(upload => isStoreUploadReadyForAutomation(store, upload, "scheduledOnly", Date.now(), scheduledIds))
+    .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
 }
 
 export async function automationInput(platform?: Platform, mode: AutomationInputMode = "ready"): Promise<AutomationInput> {
-  const uploads = await listUploads(platform);
-  const accounts = await listPlatformAccounts(platform);
-  const enabledIds = new Set(accounts.filter(account => account.enabled).map(account => account.id));
-  const queued = uploads.filter(upload => enabledIds.has(upload.accountId) && (mode === "scheduledOnly" ? isDueScheduledUpload(upload) : isUploadReadyForAutomation(upload)));
+  const store = await readStore();
+  const scheduledIds = dueScheduleIds(store);
+  const uploads = store.uploads
+    .filter(upload => !platform || upload.platform === platform)
+    .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+  const queued = uploads.filter(upload => isStoreUploadReadyForAutomation(store, upload, mode, Date.now(), scheduledIds));
   const channels = Object.fromEntries(platforms.map(channel => [
     channel,
     platform && platform !== channel ? [] : queued.filter(upload => upload.platform === channel)
