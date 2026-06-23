@@ -4,7 +4,8 @@ A focused web app dashboard for synchronizing platform folders into scheduled pu
 
 The app is intentionally simple in this phase:
 
-- Instagram, X, LinkedIn, Facebook, and YouTube folder connections.
+- Multiple Instagram, X, LinkedIn, Facebook, and YouTube accounts.
+- One isolated media folder, post queue, delivery history, and browser profile per account.
 - Per-post title, caption, date, and time controls.
 - Uploaded files are stored locally and exposed as structured input for future n8n + Playwright automation.
 - No official social platform APIs are used.
@@ -42,6 +43,17 @@ Upload to a platform:
 POST /api/platforms/:platform/uploads
 ```
 
+Include `accountId` in the multipart form so the post is routed to one specific publishing account.
+
+Publishing account endpoints:
+
+```text
+GET    /api/accounts
+POST   /api/platforms/:platform/accounts
+PATCH  /api/accounts/:id
+DELETE /api/accounts/:id
+```
+
 Allowed platform values:
 
 ```text
@@ -54,7 +66,7 @@ youtube
 
 ## Connected Folders
 
-Each platform card has a **Connect folder** action. Enter the absolute path of a local folder, such as:
+Open a platform card, add an account, and connect that account's folder. Enter an absolute path such as:
 
 ```text
 C:\Users\YourName\Posts\Instagram
@@ -71,7 +83,7 @@ Folder connection endpoints:
 
 ```text
 GET    /api/folder-connections
-POST   /api/platforms/:platform/folder-connection
+POST   /api/accounts/:accountId/folder-connection
 DELETE /api/folder-connections/:id
 ```
 
@@ -85,6 +97,12 @@ List uploads for one platform:
 
 ```text
 GET /api/platforms/:platform/uploads
+```
+
+List uploads routed to one account:
+
+```text
+GET /api/uploads?accountId=:accountId
 ```
 
 n8n input endpoint:
@@ -102,7 +120,8 @@ That endpoint returns queued uploads grouped like this:
     "instagram": [],
     "x": [],
     "linkedin": [],
-    "facebook": []
+    "facebook": [],
+    "youtube": []
   }
 }
 ```
@@ -110,9 +129,11 @@ That endpoint returns queued uploads grouped like this:
 ## Storage
 
 - Upload metadata is stored in `data/store.json`.
+- Account passwords are encrypted at rest. The machine-local key is stored in the ignored `data/account-secret.key` file, or can be supplied with `LOCAL_ACCOUNT_SECRET_KEY`.
+- Passwords are never returned by the account API.
 - Uploaded files are stored in `uploads/`.
 - Shared TypeScript/Zod contracts live in `shared/schema.ts`.
 
 ## Next Phase
 
-n8n will read `GET /api/automation/input`, then pass each platform queue item to Playwright code that opens the correct browser profile and posts to the respective platform through the browser UI.
+Supabase can replace the local account and secret store without changing account IDs or post routing. Automation already opens a separate persistent browser profile for each account and publishes only that account's assigned queue.

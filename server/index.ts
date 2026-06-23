@@ -5,14 +5,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ZodError } from "zod";
-import { platformSchema, updateUploadDetailsSchema, updateUploadStatusSchema } from "../shared/schema";
+import { platformSchema, updateUploadDetailsSchema, updateUploadStatusSchema, upsertPlatformAccountSchema } from "../shared/schema";
 import {
   automationInput,
+  createPlatformAccount,
   createUpload,
   dashboardSummary,
+  deletePlatformAccount,
   deleteUpload,
+  getPlatformAccount,
   listFolderConnections,
+  listPlatformAccounts,
   listUploads,
+  updatePlatformAccount,
   updateUploadDetails,
   updateUploadStatus
 } from "./storage";
@@ -99,7 +104,8 @@ app.get("/api/dashboard", async (_req, res, next) => {
 app.get("/api/uploads", async (req, res, next) => {
   try {
     const platform = req.query.platform ? platformSchema.parse(req.query.platform) : undefined;
-    res.json(await listUploads(platform));
+    const accountId = typeof req.query.accountId === "string" ? req.query.accountId : undefined;
+    res.json(await listUploads(platform, accountId));
   } catch (error) {
     next(error);
   }
@@ -108,7 +114,55 @@ app.get("/api/uploads", async (req, res, next) => {
 app.get("/api/platforms/:platform/uploads", async (req, res, next) => {
   try {
     const platform = platformSchema.parse(req.params.platform);
-    res.json(await listUploads(platform));
+    const accountId = typeof req.query.accountId === "string" ? req.query.accountId : undefined;
+    res.json(await listUploads(platform, accountId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- PUBLISHING ACCOUNTS ---
+app.get("/api/accounts", async (req, res, next) => {
+  try {
+    const platform = req.query.platform ? platformSchema.parse(req.query.platform) : undefined;
+    res.json(await listPlatformAccounts(platform));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/platforms/:platform/accounts", async (req, res, next) => {
+  try {
+    const platform = platformSchema.parse(req.params.platform);
+    const payload = upsertPlatformAccountSchema.parse(req.body);
+    res.status(201).json(await createPlatformAccount(platform, payload));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/accounts/:id", async (req, res, next) => {
+  try {
+    const payload = upsertPlatformAccountSchema.parse(req.body);
+    const account = await updatePlatformAccount(req.params.id, payload);
+    if (!account) {
+      res.status(404).json({ message: "Publishing account not found" });
+      return;
+    }
+    res.json(account);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/accounts/:id", async (req, res, next) => {
+  try {
+    const account = await deletePlatformAccount(req.params.id);
+    if (!account) {
+      res.status(404).json({ message: "Publishing account not found" });
+      return;
+    }
+    res.status(204).send();
   } catch (error) {
     next(error);
   }
@@ -118,6 +172,7 @@ app.get("/api/platforms/:platform/uploads", async (req, res, next) => {
 app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, res, next) => {
   try {
     const platform = platformSchema.parse(req.params.platform);
+    const accountId = typeof req.body?.accountId === "string" ? req.body.accountId : "";
     const { title, caption, scheduledAt } = req.body; // 👈 EXTRACT TITLE
 
     const normalizedScheduledAt = normalizeScheduledAt(scheduledAt);
@@ -132,7 +187,11 @@ app.post("/api/platforms/:platform/uploads", upload.single("file"), async (req, 
       return;
     }
 
-    const item = await createUpload(platform, {
+    if (!accountId) throw new Error("Choose a publishing account.");
+    const account = await getPlatformAccount(accountId);
+    if (!account || account.platform !== platform) throw new Error("Publishing account does not belong to this platform.");
+
+    const item = await createUpload(accountId, {
       originalName: req.file.originalname,
       fileName: req.file.filename,
       mimeType: req.file.mimetype,
@@ -213,12 +272,11 @@ app.get("/api/folder-connections", async (_req, res, next) => {
   }
 });
 
-app.post("/api/platforms/:platform/folder-connection", async (req, res, next) => {
+app.post("/api/accounts/:accountId/folder-connection", async (req, res, next) => {
   try {
-    const platform = platformSchema.parse(req.params.platform);
     const folderPath = typeof req.body?.folderPath === "string" ? req.body.folderPath : "";
     if (!folderPath.trim()) throw new Error("Folder path is required.");
-    res.json(await connectPlatformFolder(platform, folderPath));
+    res.json(await connectPlatformFolder(req.params.accountId, folderPath));
   } catch (error) {
     next(error);
   }

@@ -1,5 +1,11 @@
 import type { Page } from "playwright";
 
+export type AccountLogin = {
+  identifier?: string;
+  password?: string;
+  confirmation?: string;
+};
+
 type ManualLoginFallbackOptions = {
   page: Page;
   platform: string;

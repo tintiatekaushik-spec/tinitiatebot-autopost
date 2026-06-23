@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
+import type { AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -557,9 +558,9 @@ async function waitForLoginResult(page: Page) {
   throw new Error("Instagram login did not finish within 90 seconds.");
 }
 
-export async function loginToInstagram(page: Page, _upload?: PlatformUpload, holdAfterLogin = true) {
-  const username = (process.env.INSTAGRAM_EMAIL ?? process.env.INSTAGRAM_USERNAME)?.trim();
-  const password = process.env.INSTAGRAM_PASSWORD?.trim();
+export async function loginToInstagram(page: Page, _upload?: PlatformUpload, holdAfterLogin = true, accountLogin?: AccountLogin) {
+  const username = accountLogin?.identifier?.trim() || (process.env.INSTAGRAM_EMAIL ?? process.env.INSTAGRAM_USERNAME)?.trim();
+  const password = accountLogin?.password?.trim() || process.env.INSTAGRAM_PASSWORD?.trim();
 
   if (!username || !password) {
     throw new Error("Missing INSTAGRAM_EMAIL/INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD in .env");
@@ -595,11 +596,11 @@ export async function loginToInstagram(page: Page, _upload?: PlatformUpload, hol
   return { success: true };
 }
 
-export async function postToInstagram(page: Page, upload: PlatformUpload) {
+export async function postToInstagram(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
   const filePath = path.join(rootDir, "uploads", upload.fileName);
   if (!fs.existsSync(filePath)) throw new Error(`Instagram upload file not found: ${filePath}`);
 
-  await loginToInstagram(page, upload, false);
+  await loginToInstagram(page, upload, false, accountLogin);
   await clickCreateButton(page);
   await uploadInstagramMedia(page, filePath);
   await dismissInstagramReelsInfo(page);

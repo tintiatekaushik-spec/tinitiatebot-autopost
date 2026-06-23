@@ -1,20 +1,18 @@
-import { chromium } from "playwright";
-import { automationInput, updateUploadStatus, type AutomationInputMode } from "../storage.js";
+import { chromium, type BrowserContext, type Page } from "playwright";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { PlatformUpload } from "../../shared/schema.js";
+import { automationInput, getPublishingAccount, listUploads, updateUploadStatus, type AutomationInputMode, type PublishingAccount } from "../storage.js";
 import { postToFacebook } from "./publishers/facebook.js";
 import { postToInstagram } from "./publishers/instagram.js";
 import { postToLinkedIn } from "./publishers/linkedin.js";
+import type { AccountLogin } from "./publishers/manual-login.js";
 import { postToYouTube } from "./publishers/youtube.js";
 import { postToX } from "./publishers/x.js";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const rootDir = path.resolve(__dirname, "../..");
-const userDataDir = path.join(rootDir, "browser-data");
-const facebookUserDataDir = resolveProfilePath(process.env.FACEBOOK_USER_DATA_DIR, "facebook-browser-data");
-const xUserDataDir = resolveProfilePath(process.env.X_USER_DATA_DIR, "x-browser-data");
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const accountProfilesDir = path.join(rootDir, "browser-data", "accounts");
 
 const disabledChromeFeatures = [
   "IsolateOrigins",
@@ -26,7 +24,7 @@ const disabledChromeFeatures = [
   "SignInProfileCreation",
   "IdentityDiscAccountMenu",
   "AccountConsistency",
-  "PasswordManagerOnboarding",
+  "PasswordManagerOnboarding"
 ].join(",");
 
 function readJsonFile(filePath: string) {
@@ -42,212 +40,83 @@ function writeJsonFile(filePath: string, data: Record<string, any>) {
   fs.writeFileSync(filePath, JSON.stringify(data));
 }
 
-function resolveProfilePath(envPath: string | undefined, fallbackFolder: string) {
-  if (!envPath?.trim()) return path.join(rootDir, fallbackFolder);
-  return path.isAbsolute(envPath) ? envPath : path.resolve(rootDir, envPath);
+function accountProfilePath(account: PublishingAccount) {
+  return path.join(accountProfilesDir, account.platform, account.id.replace(/[^a-z0-9-_]/gi, "-"));
 }
 
-function prepareChromeProfile(profileDir = userDataDir) {
+function prepareChromeProfile(profileDir: string) {
   const preferencesPath = path.join(profileDir, "Default", "Preferences");
   const preferences = readJsonFile(preferencesPath);
-
-  preferences.browser = {
-    ...(preferences.browser ?? {}),
-    has_seen_welcome_page: true,
-  };
+  preferences.browser = { ...(preferences.browser ?? {}), has_seen_welcome_page: true };
   preferences.credentials_enable_service = false;
-  preferences.profile = {
-    ...(preferences.profile ?? {}),
-    exit_type: "Normal",
-    password_manager_enabled: false,
-  };
-  preferences.signin = {
-    ...(preferences.signin ?? {}),
-    allowed: false,
-    allowed_on_next_startup: false,
-  };
-  preferences.sync = {
-    ...(preferences.sync ?? {}),
-    suppress_start: true,
-  };
-
+  preferences.profile = { ...(preferences.profile ?? {}), exit_type: "Normal", password_manager_enabled: false };
+  preferences.signin = { ...(preferences.signin ?? {}), allowed: false, allowed_on_next_startup: false };
+  preferences.sync = { ...(preferences.sync ?? {}), suppress_start: true };
   writeJsonFile(preferencesPath, preferences);
 }
 
+async function launchAccountBrowser(account: PublishingAccount): Promise<BrowserContext> {
+  const profileDir = accountProfilePath(account);
+  prepareChromeProfile(profileDir);
+  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
+  const commonArgs = ["--no-first-run", "--no-default-browser-check", "--disable-notifications", "--deny-permission-prompts"];
+  return chromium.launchPersistentContext(profileDir, {
+    headless: false,
+    channel: "chrome",
+    slowMo: slowMoMs,
+    viewport: null,
+    args: account.platform === "facebook"
+      ? commonArgs
+      : [...commonArgs, "--disable-blink-features=AutomationControlled", "--disable-site-isolation-trials", "--disable-sync", "--disable-signin-promo", `--disable-features=${disabledChromeFeatures}`],
+    userAgent: account.platform === "facebook" ? undefined : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  });
+}
+
+function accountLogin(account: PublishingAccount): AccountLogin {
+  return {
+    identifier: account.loginIdentifier === "Existing browser session" ? undefined : account.loginIdentifier,
+    password: account.password,
+    confirmation: account.loginConfirmation
+  };
+}
+
+async function publishOne(page: Page, upload: PlatformUpload, account: PublishingAccount) {
+  const login = accountLogin(account);
+  switch (upload.platform) {
+    case "youtube": return postToYouTube(page, upload, login);
+    case "linkedin": return postToLinkedIn(page, upload, login);
+    case "instagram": return postToInstagram(page, upload, login);
+    case "facebook": return postToFacebook(page, upload, login);
+    case "x": return postToX(page, upload, login);
+  }
+}
+
 function getFailureHoldMs() {
-  return Number(process.env.AUTOMATION_FAILURE_HOLD_MS ?? 0);
+  const configured = Number(process.env.AUTOMATION_FAILURE_HOLD_MS ?? 0);
+  return Number.isFinite(configured) ? Math.max(0, configured) : 0;
 }
 
-async function holdOnFailureIfConfigured(hadFailure: boolean) {
-  const failureHoldMs = getFailureHoldMs();
-
-  if (hadFailure && failureHoldMs > 0) {
-    console.log(`Automation failed. Keeping Chrome open for ${failureHoldMs / 1000} seconds so you can inspect the screen...`);
-    await new Promise((resolve) => setTimeout(resolve, failureHoldMs));
-  }
-}
-
-async function runSharedBrowserApps(youtubeUploads: any[], linkedinUploads: any[], instagramUploads: any[]) {
-  prepareChromeProfile();
-  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
-
-  const browser = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    channel: "chrome",
-    slowMo: slowMoMs,
-    viewport: null,
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-site-isolation-trials",
-      "--disable-sync",
-      "--disable-signin-promo",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-default-apps",
-      `--disable-features=${disabledChromeFeatures}`,
-    ],
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  });
-
+async function runAccountQueue(account: PublishingAccount, uploads: PlatformUpload[]) {
+  console.log(`Publishing ${uploads.length} post(s) through ${account.platform} account ${account.handle} (${account.id}).`);
+  const browser = await launchAccountBrowser(account);
   let hadFailure = false;
-
   try {
-    const page = await browser.newPage();
-
-    for (const upload of youtubeUploads) {
+    const page = browser.pages()[0] ?? await browser.newPage();
+    for (const upload of uploads) {
       await updateUploadStatus(upload.id, "processing");
-
       try {
-        await postToYouTube(page, upload);
+        await publishOne(page, upload, account);
         await updateUploadStatus(upload.id, "posted");
-        console.log(`Posted ${upload.id} to YouTube.`);
-      } catch (error: any) {
+        console.log(`Posted ${upload.id} through ${account.handle}.`);
+      } catch (error) {
         hadFailure = true;
         await updateUploadStatus(upload.id, "failed");
-        console.error(`Failed ${upload.id}: ${error.message}`);
+        console.error(`Failed ${upload.id} through ${account.handle}:`, error instanceof Error ? error.message : error);
       }
     }
-
-    if (linkedinUploads.length > 0) {
-      for (const upload of linkedinUploads) {
-        await updateUploadStatus(upload.id, "processing");
-        try {
-          await postToLinkedIn(page, upload);
-          await updateUploadStatus(upload.id, "posted");
-          console.log(`Posted ${upload.id} to LinkedIn.`);
-        } catch (error: any) {
-          hadFailure = true;
-          await updateUploadStatus(upload.id, "failed");
-          console.error(`Failed ${upload.id} on LinkedIn: ${error.message}`);
-        }
-      }
-    }
-
-    if (instagramUploads.length > 0) {
-      for (const upload of instagramUploads) {
-        await updateUploadStatus(upload.id, "processing");
-
-        try {
-          await postToInstagram(page, upload);
-          await updateUploadStatus(upload.id, "posted");
-          console.log(`Posted ${upload.id} to Instagram.`);
-        } catch (error: any) {
-          hadFailure = true;
-          await updateUploadStatus(upload.id, "failed");
-          console.error(`Failed ${upload.id} on Instagram: ${error.message}`);
-        }
-      }
-    }
+    const holdMs = getFailureHoldMs();
+    if (hadFailure && holdMs > 0) await new Promise(resolve => setTimeout(resolve, holdMs));
   } finally {
-    await holdOnFailureIfConfigured(hadFailure);
-    await browser.close();
-  }
-}
-
-async function runFacebookApps(facebookUploads: any[]) {
-  prepareChromeProfile(facebookUserDataDir);
-  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
-
-  console.log(`Using dedicated Facebook Chrome profile: ${facebookUserDataDir}`);
-
-  const browser = await chromium.launchPersistentContext(facebookUserDataDir, {
-    headless: false,
-    channel: "chrome",
-    slowMo: slowMoMs,
-    viewport: null,
-    args: [
-      "--disable-notifications",
-      "--deny-permission-prompts",
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
-
-  let hadFailure = false;
-
-  try {
-    const page = await browser.newPage();
-
-    for (const upload of facebookUploads) {
-      await updateUploadStatus(upload.id, "processing");
-
-      try {
-        await postToFacebook(page, upload);
-        await updateUploadStatus(upload.id, "posted");
-        console.log(`Posted ${upload.id} to Facebook.`);
-      } catch (error: any) {
-        hadFailure = true;
-        await updateUploadStatus(upload.id, "failed");
-        console.error(`Failed ${upload.id} on Facebook: ${error.message}`);
-      }
-    }
-  } finally {
-    await holdOnFailureIfConfigured(hadFailure);
-    await browser.close();
-  }
-}
-
-async function runXApps(xUploads: any[]) {
-  prepareChromeProfile(xUserDataDir);
-  const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
-
-  console.log(`Using dedicated X Chrome profile: ${xUserDataDir}`);
-
-  const browser = await chromium.launchPersistentContext(xUserDataDir, {
-    headless: false,
-    channel: "chrome",
-    slowMo: slowMoMs,
-    viewport: null,
-    args: [
-      "--disable-notifications",
-      "--deny-permission-prompts",
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
-
-  let hadFailure = false;
-
-  try {
-    const page = await browser.newPage();
-
-    for (const upload of xUploads) {
-      await updateUploadStatus(upload.id, "processing");
-
-      try {
-        await postToX(page, upload);
-        await updateUploadStatus(upload.id, "posted");
-        console.log(`Posted ${upload.id} to X.`);
-      } catch (error: any) {
-        hadFailure = true;
-        await updateUploadStatus(upload.id, "failed");
-        console.error(`Failed ${upload.id} on X: ${error.message}`);
-      }
-    }
-  } finally {
-    await holdOnFailureIfConfigured(hadFailure);
     await browser.close();
   }
 }
@@ -266,46 +135,35 @@ export function isAutomationRunning() {
 async function runAutomationOnce({ mode = "ready", trigger = "manual" }: RunAutomationOptions) {
   console.log(`Starting publisher automation (${trigger})...`);
   const { channels } = await automationInput(undefined, mode);
-
-  const youtubeUploads = channels.youtube || [];
-  const linkedinUploads = channels.linkedin || [];
-  const instagramUploads = channels.instagram || [];
-  const facebookUploads = channels.facebook || [];
-  const xUploads = channels.x || [];
-
-  if (
-    youtubeUploads.length === 0 &&
-    linkedinUploads.length === 0 &&
-    instagramUploads.length === 0 &&
-    facebookUploads.length === 0 &&
-    xUploads.length === 0
-  ) {
-    console.log("No due uploads for YouTube, LinkedIn, Instagram, Facebook, or X.");
+  const uploads = Object.values(channels).flat();
+  if (uploads.length === 0) {
+    console.log("No due uploads for enabled publishing accounts.");
     return;
   }
 
-  if (youtubeUploads.length > 0 || linkedinUploads.length > 0 || instagramUploads.length > 0) {
-    await runSharedBrowserApps(youtubeUploads, linkedinUploads, instagramUploads);
-  }
+  const queues = new Map<string, PlatformUpload[]>();
+  for (const upload of uploads) queues.set(upload.accountId, [...(queues.get(upload.accountId) ?? []), upload]);
 
-  if (facebookUploads.length > 0) {
-    await runFacebookApps(facebookUploads);
-  }
-
-  if (xUploads.length > 0) {
-    await runXApps(xUploads);
+  for (const [accountId, accountUploads] of queues) {
+    const account = await getPublishingAccount(accountId);
+    if (!account || !account.enabled) {
+      for (const upload of accountUploads) await updateUploadStatus(upload.id, "failed");
+      console.error(`Publishing account ${accountId} is missing or disabled.`);
+      continue;
+    }
+    try {
+      await runAccountQueue(account, accountUploads);
+    } catch (error) {
+      const currentUploads = await listUploads(account.platform, account.id);
+      const queuedIds = new Set(accountUploads.map(upload => upload.id));
+      for (const upload of currentUploads) if (queuedIds.has(upload.id) && upload.status !== "posted") await updateUploadStatus(upload.id, "failed");
+      console.error(`Could not run account ${account.handle}:`, error);
+    }
   }
 }
 
 export function runAutomation(options: RunAutomationOptions = {}) {
-  if (activeAutomationRun) {
-    console.log("Publisher automation is already running; reusing the active run.");
-    return activeAutomationRun;
-  }
-
-  activeAutomationRun = runAutomationOnce(options).finally(() => {
-    activeAutomationRun = null;
-  });
-
+  if (activeAutomationRun) return activeAutomationRun;
+  activeAutomationRun = runAutomationOnce(options).finally(() => { activeAutomationRun = null; });
   return activeAutomationRun;
 }

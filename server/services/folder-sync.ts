@@ -3,12 +3,13 @@ import { watch, type FSWatcher } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { FolderConnection, Platform, PlatformUpload } from "../../shared/schema.js";
+import type { FolderConnection, PlatformUpload } from "../../shared/schema.js";
 import {
   createUpload,
   deleteFolderConnection,
   deleteUpload,
   getFolderConnection,
+  getPlatformAccount,
   listFolderConnections,
   listUploads,
   setFolderSourcePresent,
@@ -160,7 +161,7 @@ async function syncFolderConnectionNow(connectionId: string): Promise<FolderSync
 
     const { files, skippedUnsettledFile } = await scanDirectory(connection);
     const currentFiles = new Map(files.map((file) => [sourceKey(file.relativePath), file]));
-    const connectedUploads = (await listUploads(connection.platform))
+    const connectedUploads = (await listUploads(connection.platform, connection.accountId))
       .filter((upload) => upload.folderSource?.connectionId === connection.id);
     const activeUploads = new Map<string, PlatformUpload>();
 
@@ -177,7 +178,7 @@ async function syncFolderConnectionNow(connectionId: string): Promise<FolderSync
         const fileName = internalFileName(file);
         await fs.copyFile(file.absolutePath, path.join(uploadDir, fileName));
         const caption = defaultPostText(file.originalName);
-        await createUpload(connection.platform, {
+        await createUpload(connection.accountId, {
           originalName: file.originalName,
           fileName,
           mimeType: file.mimeType,
@@ -268,7 +269,9 @@ async function startWatcher(connection: FolderConnection) {
   }
 }
 
-export async function connectPlatformFolder(platform: Platform, requestedPath: string) {
+export async function connectPlatformFolder(accountId: string, requestedPath: string) {
+  const account = await getPlatformAccount(accountId);
+  if (!account) throw new Error("Publishing account not found.");
   const folderPath = normalizeFolderPath(requestedPath);
   const stat = await fs.stat(folderPath).catch(() => null);
   if (!stat?.isDirectory()) throw new Error("Folder path does not exist or is not accessible.");
@@ -276,11 +279,11 @@ export async function connectPlatformFolder(platform: Platform, requestedPath: s
     throw new Error("Choose a source folder outside the application's uploads folder.");
   }
 
-  const existingConnection = (await listFolderConnections()).find((connection) => connection.platform === platform);
+  const existingConnection = (await listFolderConnections()).find((connection) => connection.accountId === accountId);
   const existingSync = existingConnection ? activeSyncs.get(existingConnection.id) : null;
   if (existingSync) await existingSync.catch(() => undefined);
 
-  const connection = await upsertFolderConnection(platform, folderPath);
+  const connection = await upsertFolderConnection(accountId, folderPath);
   await startWatcher(connection);
   const sync = await syncFolderConnection(connection.id);
   return { connection: await getFolderConnection(connection.id), sync };
@@ -299,7 +302,7 @@ export async function disconnectPlatformFolder(connectionId: string) {
   if (debounce) clearTimeout(debounce);
   debounceTimers.delete(connectionId);
 
-  const uploads = (await listUploads(connection.platform))
+  const uploads = (await listUploads(connection.platform, connection.accountId))
     .filter((upload) => upload.folderSource?.connectionId === connectionId && upload.folderSource.present);
 
   for (const upload of uploads) {

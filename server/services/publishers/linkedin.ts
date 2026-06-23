@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
+import type { AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -408,9 +409,9 @@ async function waitForLoginResult(page: Page) {
   throw new Error("LinkedIn login did not finish within 60 seconds.");
 }
 
-export async function loginToLinkedIn(page: Page, _upload?: PlatformUpload) {
-  const email = process.env.LINKEDIN_EMAIL?.trim();
-  const password = process.env.LINKEDIN_PASSWORD?.trim();
+export async function loginToLinkedIn(page: Page, _upload?: PlatformUpload, accountLogin?: AccountLogin) {
+  const email = accountLogin?.identifier?.trim() || process.env.LINKEDIN_EMAIL?.trim();
+  const password = accountLogin?.password?.trim() || process.env.LINKEDIN_PASSWORD?.trim();
 
   if (!email || !password) throw new Error("Missing LINKEDIN_EMAIL or LINKEDIN_PASSWORD in .env");
 
@@ -436,7 +437,7 @@ export async function loginToLinkedIn(page: Page, _upload?: PlatformUpload) {
   return { success: true };
 }
 
-export async function postToLinkedIn(page: Page, upload: PlatformUpload) {
+export async function postToLinkedIn(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
   const filePath = path.join(rootDir, "uploads", upload.fileName);
   if (!fs.existsSync(filePath)) throw new Error(`LinkedIn upload file not found: ${filePath}`);
 
@@ -444,7 +445,7 @@ export async function postToLinkedIn(page: Page, upload: PlatformUpload) {
     throw new Error("LinkedIn post text is required.");
   }
 
-  await loginToLinkedIn(page, upload);
+  await loginToLinkedIn(page, upload, accountLogin);
   await clickStartPost(page);
   await attachLinkedInMedia(page, filePath);
   await typeLinkedInPostText(page, upload.caption.trim());

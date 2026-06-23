@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
-import { waitForLoginWithManualFallback } from "./manual-login.js";
+import { waitForLoginWithManualFallback, type AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -410,13 +410,13 @@ async function waitForLoginResult(page: Page, allowManualLoginFromStart: boolean
   });
 }
 
-export async function loginToX(page: Page, _upload?: PlatformUpload, holdAfterLogin = true) {
+export async function loginToX(page: Page, _upload?: PlatformUpload, holdAfterLogin = true, accountLogin?: AccountLogin) {
   const username = (process.env.X_USERNAME ?? process.env.TWITTER_USERNAME)?.trim();
   const email = (process.env.X_EMAIL ?? process.env.TWITTER_EMAIL)?.trim();
   const phone = (process.env.X_PHONE ?? process.env.TWITTER_PHONE)?.trim();
-  const password = (process.env.X_PASSWORD ?? process.env.TWITTER_PASSWORD)?.trim();
-  const identifier = email || username || phone;
-  const confirmation = process.env.X_LOGIN_CONFIRMATION?.trim() || username || phone || email || "";
+  const password = accountLogin?.password?.trim() || (process.env.X_PASSWORD ?? process.env.TWITTER_PASSWORD)?.trim();
+  const identifier = accountLogin?.identifier?.trim() || email || username || phone;
+  const confirmation = accountLogin?.confirmation?.trim() || process.env.X_LOGIN_CONFIRMATION?.trim() || username || phone || email || "";
   const automaticLogin = process.env.X_AUTO_LOGIN !== "false" && Boolean(identifier && password);
 
   console.log("Navigating to X...");
@@ -457,14 +457,14 @@ export async function loginToX(page: Page, _upload?: PlatformUpload, holdAfterLo
   return { success: true };
 }
 
-export async function postToX(page: Page, upload: PlatformUpload) {
+export async function postToX(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
   const filePath = path.join(rootDir, "uploads", upload.fileName);
   if (!fs.existsSync(filePath)) throw new Error(`X upload file not found: ${filePath}`);
 
   const caption = upload.caption?.trim();
   if (!caption) throw new Error("X caption is required.");
 
-  await loginToX(page, upload, false);
+  await loginToX(page, upload, false, accountLogin);
   await openPostComposer(page);
   await attachXMedia(page, filePath);
   await fillXCaption(page, caption);

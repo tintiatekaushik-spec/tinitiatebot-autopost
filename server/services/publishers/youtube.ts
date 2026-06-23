@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
+import type { AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -349,9 +350,9 @@ async function waitForPublishComplete(page: Page) {
   throw new Error("Publish confirmation appeared, but the Close button could not be clicked.");
 }
 
-export async function postToYouTube(page: Page, upload: PlatformUpload) {
-  const email = process.env.YOUTUBE_EMAIL?.trim();
-  const password = process.env.YOUTUBE_PASSWORD?.trim();
+export async function postToYouTube(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
+  const email = accountLogin?.identifier?.trim() || process.env.YOUTUBE_EMAIL?.trim();
+  const password = accountLogin?.password?.trim() || process.env.YOUTUBE_PASSWORD?.trim();
 
   if (!email || !password) throw new Error("Missing YouTube credentials in .env");
 

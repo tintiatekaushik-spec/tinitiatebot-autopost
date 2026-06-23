@@ -9,9 +9,32 @@ export const uploadStatusSchema = z.enum(uploadStatuses);
 export type Platform = (typeof platforms)[number];
 export type UploadStatus = (typeof uploadStatuses)[number];
 
+export const platformAccountSchema = z.object({
+  id: z.string(),
+  platform: platformSchema,
+  displayName: z.string(),
+  handle: z.string(),
+  loginIdentifier: z.string(),
+  loginConfirmation: z.string().optional(),
+  credentialConfigured: z.boolean(),
+  enabled: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+
+export const upsertPlatformAccountSchema = z.object({
+  displayName: z.string().trim().min(1, "Account name is required"),
+  handle: z.string().trim().min(1, "Account handle is required"),
+  loginIdentifier: z.string().trim().min(1, "Login email or username is required"),
+  loginConfirmation: z.string().trim().optional(),
+  password: z.string().min(1, "Password is required").optional(),
+  enabled: z.boolean().optional()
+});
+
 export const folderConnectionSchema = z.object({
   id: z.string(),
   platform: platformSchema,
+  accountId: z.string(),
   folderPath: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -55,6 +78,7 @@ export const uploadAutomationSchema = z.object({
   n8nInputKey: z.string(),
   playwright: z.object({
     platform: platformSchema,
+    accountId: z.string(),
     browserProfileName: z.string(),
     publishSurface: z.string(),
     sourceFileUrl: z.string()
@@ -64,6 +88,7 @@ export const uploadAutomationSchema = z.object({
 export const platformUploadSchema = z.object({
   id: z.string(),
   platform: platformSchema,
+  accountId: z.string(),
   originalName: z.string(),
   fileName: z.string(),
   mimeType: z.string(),
@@ -83,7 +108,8 @@ export const platformUploadSchema = z.object({
 export const updateUploadDetailsSchema = z.object({
   title: z.string().trim().optional(),
   caption: z.string().trim().min(1, "Caption is required"),
-  scheduledAt: z.string().nullable().optional()
+  scheduledAt: z.string().nullable().optional(),
+  accountId: z.string().optional()
 });
 
 export const updateUploadStatusSchema = z.object({
@@ -92,10 +118,12 @@ export const updateUploadStatusSchema = z.object({
 });
 
 export type PlatformUpload = z.infer<typeof platformUploadSchema>;
+export type PlatformAccount = z.infer<typeof platformAccountSchema>;
 export type FolderConnection = z.infer<typeof folderConnectionSchema>;
 export type UploadAutomation = z.infer<typeof uploadAutomationSchema>;
 export type UpdateUploadStatusInput = z.input<typeof updateUploadStatusSchema>;
 export type UpdateUploadDetailsInput = z.input<typeof updateUploadDetailsSchema>;
+export type UpsertPlatformAccountInput = z.input<typeof upsertPlatformAccountSchema>;
 
 export type DashboardSummary = {
   totalUploads: number;

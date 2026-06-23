@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
-import { waitForLoginWithManualFallback } from "./manual-login.js";
+import { waitForLoginWithManualFallback, type AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -585,15 +585,16 @@ async function waitForLoginResult(page: Page, allowManualLoginFromStart = false)
   });
 }
 
-export async function loginToFacebook(page: Page, _upload?: PlatformUpload, holdAfterLogin = true) {
+export async function loginToFacebook(page: Page, _upload?: PlatformUpload, holdAfterLogin = true, accountLogin?: AccountLogin) {
   const email = (
     process.env.FACEBOOK_EMAIL ??
     process.env.FACEBOOK_USERNAME ??
     process.env.FB_EMAIL ??
     process.env.FB_USERNAME
   )?.trim();
-  const password = (process.env.FACEBOOK_PASSWORD ?? process.env.FB_PASSWORD)?.trim();
-  const credentialsConfigured = Boolean(email && password);
+  const resolvedEmail = accountLogin?.identifier?.trim() || email;
+  const password = accountLogin?.password?.trim() || (process.env.FACEBOOK_PASSWORD ?? process.env.FB_PASSWORD)?.trim();
+  const credentialsConfigured = Boolean(resolvedEmail && password);
   const autoLogin = process.env.FACEBOOK_AUTO_LOGIN !== "false" && credentialsConfigured;
 
   if (process.env.FACEBOOK_AUTO_LOGIN === "true" && !credentialsConfigured) {
@@ -608,13 +609,13 @@ export async function loginToFacebook(page: Page, _upload?: PlatformUpload, hold
 
   if (await isLoggedIn(page)) {
     console.log("Facebook session already active.");
-  } else if (autoLogin && email && password) {
+  } else if (autoLogin && resolvedEmail && password) {
     console.log("Facebook session is not active. Trying automatic login because FACEBOOK_AUTO_LOGIN=true...");
     await page.goto(FACEBOOK_LOGIN_URL, { timeout: 60000 });
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(1000);
     await dismissCookiePrompt(page);
-    await fillLoginForm(page, email, password);
+    await fillLoginForm(page, resolvedEmail, password);
     console.log("Waiting for Facebook login to process...");
     await waitForLoginResult(page);
   } else {
@@ -640,7 +641,7 @@ export async function loginToFacebook(page: Page, _upload?: PlatformUpload, hold
   return { success: true };
 }
 
-export async function postToFacebook(page: Page, upload: PlatformUpload) {
+export async function postToFacebook(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
   const filePath = path.join(rootDir, "uploads", upload.fileName);
   if (!fs.existsSync(filePath)) throw new Error(`Facebook upload file not found: ${filePath}`);
 
@@ -648,7 +649,7 @@ export async function postToFacebook(page: Page, upload: PlatformUpload) {
     throw new Error("Facebook caption is required.");
   }
 
-  await loginToFacebook(page, upload, false);
+  await loginToFacebook(page, upload, false, accountLogin);
   await clickWhatsOnYourMind(page);
   await waitForCreatePostComposerReady(page);
   await typeFacebookCaption(page, upload.caption.trim());

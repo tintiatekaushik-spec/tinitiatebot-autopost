@@ -3,9 +3,11 @@ import type {
   DashboardSummary,
   FolderConnection,
   Platform,
+  PlatformAccount,
   PlatformUpload,
   UpdateUploadDetailsInput,
-  UpdateUploadStatusInput
+  UpdateUploadStatusInput,
+  UpsertPlatformAccountInput
 } from "../../shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -36,7 +38,12 @@ export function assetUrl(url: string) {
 export const api = {
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   
-  uploads: (platform?: Platform) => request<PlatformUpload[]>(`/api/uploads${platform ? `?platform=${platform}` : ""}`),
+  uploads: (platform?: Platform, accountId?: string) => {
+    const query = new URLSearchParams();
+    if (platform) query.set("platform", platform);
+    if (accountId) query.set("accountId", accountId);
+    return request<PlatformUpload[]>(`/api/uploads${query.size ? `?${query}` : ""}`);
+  },
   
   updateUploadStatus: (id: string, payload: UpdateUploadStatusInput) =>
     request<PlatformUpload>(`/api/uploads/${id}/status`, {
@@ -57,9 +64,20 @@ export const api = {
 
   folderConnections: () => request<FolderConnection[]>("/api/folder-connections"),
 
-  connectFolder: (platform: Platform, folderPath: string) =>
+  accounts: (platform?: Platform) => request<PlatformAccount[]>(`/api/accounts${platform ? `?platform=${platform}` : ""}`),
+
+  createAccount: (platform: Platform, payload: UpsertPlatformAccountInput) =>
+    request<PlatformAccount>(`/api/platforms/${platform}/accounts`, { method: "POST", body: JSON.stringify(payload) }),
+
+  updateAccount: (accountId: string, payload: UpsertPlatformAccountInput) =>
+    request<PlatformAccount>(`/api/accounts/${accountId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+
+  deleteAccount: (accountId: string) =>
+    request<void>(`/api/accounts/${accountId}`, { method: "DELETE" }),
+
+  connectFolder: (accountId: string, folderPath: string) =>
     request<{ connection: FolderConnection; sync: { added: number; updated: number; removed: number } }>(
-      `/api/platforms/${platform}/folder-connection`,
+      `/api/accounts/${accountId}/folder-connection`,
       { method: "POST", body: JSON.stringify({ folderPath }) },
     ),
 

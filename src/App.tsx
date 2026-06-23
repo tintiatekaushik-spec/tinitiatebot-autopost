@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FaFacebook, FaInstagram, FaLinkedin, FaXTwitter, FaYoutube } from "react-icons/fa6";
-import type { FolderConnection, Platform, PlatformUpload } from "../shared/schema";
+import type { FolderConnection, Platform, PlatformAccount, PlatformUpload } from "../shared/schema";
 import { platformLabels, platforms } from "../shared/schema";
 import { api } from "./lib/api";
 import {
@@ -208,6 +208,7 @@ function LandingPage({ onSignIn }: { onSignIn: (role: UserRole) => void }) {
 
 function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void }) {
   const [uploads, setUploads] = useState<PlatformUpload[]>([]);
+  const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [folderConnections, setFolderConnections] = useState<FolderConnection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -218,8 +219,9 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
   const refresh = useCallback(async (showLoading = true) => {
     setError(null); if (showLoading) setLoading(true);
     try {
-      const [latestUploads, latestConnections] = await Promise.all([api.uploads(), api.folderConnections()]);
+      const [latestUploads, latestAccounts, latestConnections] = await Promise.all([api.uploads(), api.accounts(), api.folderConnections()]);
       setUploads(latestUploads);
+      setAccounts(latestAccounts);
       setFolderConnections(latestConnections);
     }
     catch (e) { setError(e instanceof Error ? e.message : "Failed."); }
@@ -278,6 +280,7 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
     <MonitoringConsole
       role={role}
       uploads={uploads}
+      accounts={accounts}
       folderConnections={folderConnections}
       loading={loading}
       error={error}
@@ -439,15 +442,16 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
       {folderPlatform && (
         <FolderConnectionModal
           platform={folderPlatform!}
-          connection={folderConnections.find(item => item.platform === folderPlatform!)}
-          uploads={uploads.filter(item => item.platform === folderPlatform! && item.folderSource?.present)}
+          accounts={accounts.filter(item => item.platform === folderPlatform!)}
+          connections={folderConnections.filter(item => item.platform === folderPlatform!)}
+          uploads={uploads.filter(item => item.platform === folderPlatform!)}
           onEdit={setEditingUpload}
           onClose={() => setFolderPlatform(null)}
           onSuccess={refresh}
         />
       )}
       {editingUpload && (
-        <EditPostModal upload={editingUpload!} onClose={() => setEditingUpload(null)} onSuccess={refresh} />
+        <EditPostModal upload={editingUpload!} accounts={accounts.filter(item => item.platform === editingUpload!.platform)} onClose={() => setEditingUpload(null)} onSuccess={refresh} />
       )}
     </div>
   );
@@ -533,6 +537,7 @@ function formatCalendarHeading(dayKey: string) {
 function MonitoringConsole({
   role,
   uploads,
+  accounts,
   folderConnections,
   loading,
   error,
@@ -549,6 +554,7 @@ function MonitoringConsole({
 }: {
   role: UserRole;
   uploads: PlatformUpload[];
+  accounts: PlatformAccount[];
   folderConnections: FolderConnection[];
   loading: boolean;
   error: string | null;
@@ -660,6 +666,7 @@ function MonitoringConsole({
     <Workboard
       role={role}
       uploads={uploads}
+      accounts={accounts}
       folderConnections={folderConnections}
       loading={loading}
       error={error}
@@ -874,14 +881,15 @@ function MonitoringConsole({
       {activeFolder && (
         <FolderConnectionModal
           platform={activeFolder!}
-          connection={folderConnections.find(item => item.platform === activeFolder!)}
-          uploads={uploads.filter(item => item.platform === activeFolder! && item.folderSource?.present)}
+          accounts={accounts.filter(item => item.platform === activeFolder!)}
+          connections={folderConnections.filter(item => item.platform === activeFolder!)}
+          uploads={uploads.filter(item => item.platform === activeFolder!)}
           onEdit={onEdit}
           onClose={onCloseFolder}
           onSuccess={onRefresh}
         />
       )}
-      {editingUpload && <EditPostModal upload={editingUpload!} onClose={onCloseEdit} onSuccess={onRefresh} />}
+      {editingUpload && <EditPostModal upload={editingUpload!} accounts={accounts.filter(item => item.platform === editingUpload!.platform)} onClose={onCloseEdit} onSuccess={onRefresh} />}
       </section>
     </main>
   );
@@ -890,6 +898,7 @@ function MonitoringConsole({
 function Workboard({
   role,
   uploads,
+  accounts,
   folderConnections,
   loading,
   error,
@@ -906,6 +915,7 @@ function Workboard({
 }: {
   role: UserRole;
   uploads: PlatformUpload[];
+  accounts: PlatformAccount[];
   folderConnections: FolderConnection[];
   loading: boolean;
   error: string | null;
@@ -926,6 +936,7 @@ function Workboard({
   });
   const [selectedDay, setSelectedDay] = useState(() => toLocalDayKey(new Date()));
   const [activeView, setActiveView] = useState('overview');
+  const accountById = useMemo(() => new Map(accounts.map(account => [account.id, account])), [accounts]);
   const metrics = useMemo(() => {
     const posted = uploads.filter(upload => upload.status === 'posted').length;
     const failed = uploads.filter(upload => upload.status === 'failed').length;
@@ -1003,7 +1014,7 @@ function Workboard({
       return segment;
     });
   }, [broadcastMix, deliveredTotal]);
-  const trackingSummary = `${metrics.total} tracked ${metrics.total === 1 ? 'post' : 'posts'} across ${folderConnections.length} connected ${folderConnections.length === 1 ? 'folder' : 'folders'}`;
+  const trackingSummary = `${metrics.total} tracked ${metrics.total === 1 ? 'post' : 'posts'} across ${accounts.length} publishing ${accounts.length === 1 ? 'account' : 'accounts'}`;
 
   const shiftCalendarMonth = (amount: number) => {
     const next = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + amount, 1);
@@ -1042,7 +1053,7 @@ function Workboard({
         <div className='operations-hero-copy'><p className='section-kicker'>Publishing command center</p><h1>Control every post.<br />Across every channel.</h1><span>Review content, manage delivery status, and coordinate your publishing calendar from one operational workspace.</span></div>
         <div className='operations-hero-stats'>
           <article><span>Tracked content</span><strong>{metrics.total}</strong><small>Across the workspace</small></article>
-          <article><span>Connected sources</span><strong>{folderConnections.length}<i>/{platforms.length}</i></strong><small>Media folders online</small></article>
+          <article><span>Publishing accounts</span><strong>{accounts.length}</strong><small>{folderConnections.length} media folders online</small></article>
           <article><span>Open reviews</span><strong>{reviewQueue.length}</strong><small>Require attention</small></article>
           <article><span>Automation</span><strong className='automation-state'>{isRunning ? 'Running' : 'Ready'}</strong><small>{isRunning ? 'Publishing now' : 'Standing by'}</small></article>
         </div>
@@ -1053,10 +1064,12 @@ function Workboard({
         <div className='platform-metric-grid'>
           {platforms.map(platform => {
             const platformPosts = uploads.filter(upload => upload.platform === platform);
+            const platformAccounts = accounts.filter(account => account.platform === platform);
             return (
               <button key={platform} className={`platform-metric-card platform-${platform}`} onClick={() => onOpenFolder(platform)} title={`Manage ${platformLabels[platform]} folder`}>
                 <div className='platform-metric-card-top'><CustomIcon platform={platform} size={34} /><span>{platformLabels[platform]}</span><ChevronRight size={16} /></div>
                 <div className='platform-metric-number'><strong>{platformPosts.length}</strong><span>posts</span></div>
+                <div className='platform-account-summary'><UsersRound size={13} /><span>{platformAccounts.length} {platformAccounts.length === 1 ? 'account' : 'accounts'}</span></div>
               </button>
             );
           })}
@@ -1076,7 +1089,7 @@ function Workboard({
             <div className='review-queue-list'>{reviewQueue.length === 0 ? <div className='review-queue-empty'><CircleCheckBig size={24} /><strong>Nothing waiting for review.</strong><span>Every tracked post has been delivered.</span></div> : reviewQueue.map(upload => (
               <button className='review-queue-row' key={upload.id} onClick={() => onEdit(upload)}>
                 <div className={`review-queue-media review-${upload.status}`}><PostMediaPreview upload={upload} compact /><i><CustomIcon platform={upload.platform} size={17} /></i></div>
-                <span><strong>{upload.title || upload.originalName}</strong><small>{platformLabels[upload.platform]} · {upload.status === 'failed' ? 'Needs review' : upload.scheduledAt ? formatEventTime(upload.scheduledAt) : upload.status === 'processing' ? 'Publishing now' : 'Needs a publish time'}</small></span>
+                <span><strong>{upload.title || upload.originalName}</strong><small>{accountById.get(upload.accountId)?.handle ?? platformLabels[upload.platform]} · {upload.status === 'failed' ? 'Needs review' : upload.scheduledAt ? formatEventTime(upload.scheduledAt) : upload.status === 'processing' ? 'Publishing now' : 'Needs a publish time'}</small></span>
                 <Pencil size={14} />
               </button>
             ))}</div>
@@ -1109,7 +1122,7 @@ function Workboard({
           {nextAction ? (
             <button className='next-action-content' onClick={() => onEdit(nextAction)}>
               <CustomIcon platform={nextAction.platform} size={29} />
-              <span><strong>{nextAction.title || nextAction.originalName}</strong><small>{platformLabels[nextAction.platform]} · {formatEventTime(nextAction.scheduledAt ?? nextAction.updatedAt)}</small></span>
+              <span><strong>{nextAction.title || nextAction.originalName}</strong><small>{accountById.get(nextAction.accountId)?.handle ?? platformLabels[nextAction.platform]} · {formatEventTime(nextAction.scheduledAt ?? nextAction.updatedAt)}</small></span>
               <Pencil size={16} />
             </button>
           ) : <div className='next-action-empty'><CalendarDays size={24} /><span>Choose a post and set its date from the channel portfolio.</span></div>}
@@ -1124,7 +1137,7 @@ function Workboard({
               {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => <span className='calendar-weekday' key={day}>{day}</span>)}
               {calendarDays.map(day => <button type='button' key={day.dayKey} className={`calendar-day ${day.currentMonth ? '' : 'outside-month'} ${day.dayKey === selectedDay ? 'selected-day' : ''} ${day.events.length ? 'has-events' : ''}`} onClick={() => setSelectedDay(day.dayKey)} aria-label={`${formatCalendarHeading(day.dayKey)}, ${day.events.length} events`}><span className='calendar-day-number'>{day.date.getDate()}</span><span className='calendar-event-icons'>{day.events.slice(0, 3).map(upload => <CustomIcon key={upload.id} platform={upload.platform} size={14} />)}{day.events.length > 3 && <span className='calendar-more-events'>+{day.events.length - 3}</span>}</span></button>)}
             </div>
-            <aside className='workboard-day-inspector'><div><span>{formatCalendarHeading(selectedDay)}</span><strong>{selectedEvents.length}</strong></div>{selectedEvents.length === 0 ? <p>No publishing activity on this day.</p> : selectedEvents.map(upload => <button key={upload.id} onClick={() => onEdit(upload)}><CustomIcon platform={upload.platform} size={17} /><span><strong>{upload.title || upload.originalName}</strong><small>{platformLabels[upload.platform]} · {getAuditAction(upload)}</small></span><time>{new Date(getAuditTimestamp(upload)).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</time></button>)}</aside>
+            <aside className='workboard-day-inspector'><div><span>{formatCalendarHeading(selectedDay)}</span><strong>{selectedEvents.length}</strong></div>{selectedEvents.length === 0 ? <p>No publishing activity on this day.</p> : selectedEvents.map(upload => <button key={upload.id} onClick={() => onEdit(upload)}><CustomIcon platform={upload.platform} size={17} /><span><strong>{upload.title || upload.originalName}</strong><small>{accountById.get(upload.accountId)?.handle ?? platformLabels[upload.platform]} · {getAuditAction(upload)}</small></span><time>{new Date(getAuditTimestamp(upload)).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</time></button>)}</aside>
           </div>
         </article>
 
@@ -1149,111 +1162,155 @@ function Workboard({
         </article>
       </section>
 
-      {activeFolder && <FolderConnectionModal platform={activeFolder} connection={folderConnections.find(item => item.platform === activeFolder)} uploads={uploads.filter(item => item.platform === activeFolder && item.folderSource?.present)} onEdit={onEdit} onClose={onCloseFolder} onSuccess={onRefresh} />}
-      {editingUpload && <EditPostModal upload={editingUpload} onClose={onCloseEdit} onSuccess={onRefresh} />}
+      {activeFolder && <FolderConnectionModal platform={activeFolder} accounts={accounts.filter(item => item.platform === activeFolder)} connections={folderConnections.filter(item => item.platform === activeFolder)} uploads={uploads.filter(item => item.platform === activeFolder)} onEdit={onEdit} onClose={onCloseFolder} onSuccess={onRefresh} />}
+      {editingUpload && <EditPostModal upload={editingUpload} accounts={accounts.filter(item => item.platform === editingUpload.platform)} onClose={onCloseEdit} onSuccess={onRefresh} />}
       </section>
     </main>
   );
 }
 
-function FolderConnectionModal({
-  platform,
-  connection,
-  uploads,
-  onEdit,
-  onClose,
-  onSuccess,
-}: {
+function FolderConnectionModal({ platform, accounts, connections, uploads, onEdit, onClose, onSuccess }: {
   platform: Platform;
-  connection?: FolderConnection;
+  accounts: PlatformAccount[];
+  connections: FolderConnection[];
   uploads: PlatformUpload[];
   onEdit: (upload: PlatformUpload) => void;
   onClose: () => void;
   onSuccess: () => void;
 }) {
-  const [folderPath, setFolderPath] = useState(connection?.folderPath ?? "");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [formAccount, setFormAccount] = useState<PlatformAccount | 'new' | null>(null);
+  const [displayName, setDisplayName] = useState('');
+  const [handle, setHandle] = useState('');
+  const [loginIdentifier, setLoginIdentifier] = useState('');
+  const [loginConfirmation, setLoginConfirmation] = useState('');
+  const [password, setPassword] = useState('');
+  const [enabled, setEnabled] = useState(true);
+  const [folderPath, setFolderPath] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const connect = async () => {
-    if (!folderPath.trim()) return alert("Enter the full folder path");
+  const selectedAccount = accounts.find(account => account.id === selectedId);
+  const connection = connections.find(item => item.accountId === selectedId);
+  const accountUploads = uploads.filter(upload => upload.accountId === selectedId);
+
+  useEffect(() => {
+    setFolderPath(connection?.folderPath ?? '');
+  }, [connection?.id, connection?.folderPath]);
+
+  const openAccountForm = (account?: PlatformAccount) => {
+    setFormAccount(account ?? 'new');
+    setDisplayName(account?.displayName ?? '');
+    setHandle(account?.handle ?? '');
+    setLoginIdentifier(account?.loginIdentifier === 'Existing browser session' ? '' : account?.loginIdentifier ?? '');
+    setLoginConfirmation(account?.loginConfirmation ?? '');
+    setPassword('');
+    setEnabled(account?.enabled ?? true);
+  };
+
+  const saveAccount = async () => {
+    if (!displayName.trim() || !handle.trim() || !loginIdentifier.trim()) return alert('Complete the account name, handle, and login identifier.');
+    if (formAccount === 'new' && !password) return alert('Password is required for a new account.');
     setLoading(true);
     try {
-      await api.connectFolder(platform, folderPath.trim());
+      const payload = { displayName: displayName.trim(), handle: handle.trim(), loginIdentifier: loginIdentifier.trim(), loginConfirmation: loginConfirmation.trim() || undefined, password: password || undefined, enabled };
+      const saved = formAccount === 'new' ? await api.createAccount(platform, payload) : await api.updateAccount(formAccount!.id, payload);
+      setSelectedId(saved.id);
+      setFormAccount(null);
       onSuccess();
     } catch (error) {
-      alert("Error: " + (error instanceof Error ? error.message : "Could not connect folder"));
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not save account'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const connect = async () => {
+    if (!selectedAccount || !folderPath.trim()) return alert('Enter the full folder path.');
+    setLoading(true);
+    try {
+      await api.connectFolder(selectedAccount.id, folderPath.trim());
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not connect folder'));
     } finally {
       setLoading(false);
     }
   };
 
   const disconnect = async () => {
-    if (!connection || !confirm(`Disconnect the ${platformLabels[platform]} folder?`)) return;
+    if (!connection || !confirm(`Disconnect the folder for ${selectedAccount?.handle}?`)) return;
     setLoading(true);
     try {
       await api.disconnectFolder(connection.id);
+      setFolderPath('');
       onSuccess();
-      onClose();
     } catch (error) {
-      alert("Error: " + (error instanceof Error ? error.message : "Could not disconnect folder"));
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not disconnect folder'));
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-panel compact-modal" onClick={event => event.stopPropagation()}>
-        <div className="modal-head"><span>{platformLabels[platform]} Folder</span><button onClick={onClose}><X size={22} /></button></div>
-        <div className="modal-body">
-          <div className="folder-platform-row">
-            <CustomIcon platform={platform} size={28} />
-            <strong>{platformLabels[platform]}</strong>
-            <span className={`connection-state ${connection?.lastError ? "error" : connection ? "active" : ""}`}>
-              {connection?.lastError ? "Sync error" : connection ? "Connected" : "Not connected"}
-            </span>
+  const removeAccount = async () => {
+    if (!selectedAccount || !confirm(`Delete ${selectedAccount.handle}?`)) return;
+    setLoading(true);
+    try {
+      await api.deleteAccount(selectedAccount.id);
+      setSelectedId(null);
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not delete account'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <div className='modal-overlay' onClick={onClose}>
+    <div className='modal-panel account-manager-modal' onClick={event => event.stopPropagation()}>
+      <div className='modal-head'><span>{platformLabels[platform]} publishing accounts</span><button onClick={onClose}><X size={22} /></button></div>
+      <div className='modal-body'>
+        {formAccount ? <div className='account-form'>
+          <div className='account-form-heading'><CustomIcon platform={platform} size={34} /><div><strong>{formAccount === 'new' ? `Add ${platformLabels[platform]} account` : 'Edit publishing account'}</strong><span>Posts, folders, credentials, and browser sessions remain isolated per account.</span></div></div>
+          <div className='account-form-grid'>
+            <div className='field'><label>Account name</label><input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder='Main brand account' /></div>
+            <div className='field'><label>Public handle</label><input value={handle} onChange={event => setHandle(event.target.value)} placeholder='@yourbrand' /></div>
+            <div className='field account-form-wide'><label>Login email or username</label><input value={loginIdentifier} onChange={event => setLoginIdentifier(event.target.value)} autoComplete='username' /></div>
+            <div className='field account-form-wide'><label>{formAccount === 'new' ? 'Password' : 'New password (leave blank to keep current)'}</label><input type='password' value={password} onChange={event => setPassword(event.target.value)} autoComplete='new-password' /></div>
+            {platform === 'x' && <div className='field account-form-wide'><label>Login confirmation (optional username or phone)</label><input value={loginConfirmation} onChange={event => setLoginConfirmation(event.target.value)} /></div>}
           </div>
-          <div className="field">
-            <label>Local folder path</label>
-            <input
-              type="text"
-              value={folderPath}
-              onChange={event => setFolderPath(event.target.value)}
-              placeholder="C:\Users\YourName\Posts\Instagram"
-            />
+          <label className='account-enabled-toggle'><input type='checkbox' checked={enabled} onChange={event => setEnabled(event.target.checked)} /><span><strong>Automation enabled</strong><small>Allow scheduled posts to run through this account</small></span></label>
+          <div className='account-form-actions'><button className='btn-outline' onClick={() => setFormAccount(null)}>Cancel</button><button className='btn-primary' onClick={saveAccount} disabled={loading}>{loading ? <Loader2 className='spin' size={17} /> : <ShieldCheck size={17} />}Save account</button></div>
+        </div> : selectedAccount ? <div className='account-detail'>
+          <button className='account-back' onClick={() => setSelectedId(null)}><ChevronLeft size={16} />All {platformLabels[platform]} accounts</button>
+          <div className='account-detail-head'><CustomIcon platform={platform} size={38} /><div><strong>{selectedAccount.displayName}</strong><span>{selectedAccount.handle} · {selectedAccount.enabled ? 'Automation enabled' : 'Automation paused'}</span></div><button className='btn-outline' onClick={() => openAccountForm(selectedAccount)}><Pencil size={14} />Edit</button></div>
+          <div className='account-status-strip'>
+            <span><strong>{accountUploads.length}</strong><small>All posts</small></span>
+            <span><strong>{accountUploads.filter(item => item.status === 'queued').length}</strong><small>Queued</small></span>
+            <span><strong>{accountUploads.filter(item => item.status === 'posted').length}</strong><small>Published</small></span>
+            <span><strong>{accountUploads.filter(item => item.status === 'failed').length}</strong><small>Failed</small></span>
           </div>
-          {connection?.lastScannedAt && (
-            <div className="folder-scan-time">Last synced {new Date(connection.lastScannedAt).toLocaleString()}</div>
-          )}
-          {connection?.lastError && <div className="folder-error">{connection.lastError}</div>}
-          {connection && (
-            <div className="folder-posts">
-              <div className="folder-posts-head"><strong>Folder posts</strong><span>{uploads.length}</span></div>
-              {uploads.length === 0 ? (
-                <div className="folder-posts-empty">No media files detected</div>
-              ) : uploads.map(upload => (
-                <button className="folder-post-row" key={upload.id} onClick={() => onEdit(upload)}>
-                  <FileText size={18} />
-                  <span className="folder-post-name">{upload.folderSource?.relativePath ?? upload.originalName}</span>
-                  <span className="folder-post-schedule">
-                    {upload.scheduledAt ? new Date(upload.scheduledAt).toLocaleString() : "Needs schedule"}
-                  </span>
-                  <CalendarClock size={16} />
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="modal-foot folder-modal-actions">
-          {connection && <button className="btn-danger" onClick={disconnect} disabled={loading}><Unplug size={15} /> Disconnect</button>}
-          <button className="btn-primary" onClick={connect} disabled={loading}>
-            {loading ? <Loader2 className="spin" size={17} /> : <FolderSync size={17} />}
-            {connection ? "Update folder" : "Connect folder"}
-          </button>
-        </div>
+          <section className='account-folder-panel'>
+            <div className='account-subhead'><div><strong>Account media folder</strong><span>Files detected here are assigned only to {selectedAccount.handle}.</span></div><span className={`connection-state ${connection?.lastError ? 'error' : connection ? 'active' : ''}`}>{connection?.lastError ? 'Sync error' : connection ? 'Connected' : 'Not connected'}</span></div>
+            <div className='account-folder-control'><input value={folderPath} onChange={event => setFolderPath(event.target.value)} placeholder={`C:\\Posts\\${platformLabels[platform]}\\${selectedAccount.handle.replace('@', '')}`} /><button className='btn-primary' onClick={connect} disabled={loading}>{loading ? <Loader2 className='spin' size={16} /> : <FolderSync size={16} />}{connection ? 'Update' : 'Connect'}</button></div>
+            {connection?.lastScannedAt && <small className='folder-scan-time'>Last synced {new Date(connection.lastScannedAt).toLocaleString()}</small>}
+            {connection?.lastError && <div className='folder-error'>{connection.lastError}</div>}
+          </section>
+          <section className='folder-posts'>
+            <div className='folder-posts-head'><strong>Posts assigned to this account</strong><span>{accountUploads.length}</span></div>
+            {accountUploads.length === 0 ? <div className='folder-posts-empty'>No posts assigned yet</div> : accountUploads.map(upload => <button className='folder-post-row' key={upload.id} onClick={() => onEdit(upload)}><FileText size={18} /><span className='folder-post-name'>{upload.folderSource?.relativePath ?? upload.originalName}</span><span className='folder-post-schedule'>{upload.status === 'posted' ? 'Published' : upload.scheduledAt ? new Date(upload.scheduledAt).toLocaleString() : 'Needs schedule'}</span><CalendarClock size={16} /></button>)}
+          </section>
+          <div className='account-danger-actions'>{connection && <button className='btn-danger' onClick={disconnect} disabled={loading}><Unplug size={15} />Disconnect folder</button>}<button className='btn-danger ghost-danger' onClick={removeAccount} disabled={loading || Boolean(connection) || accountUploads.length > 0}><Trash2 size={15} />Delete account</button></div>
+        </div> : <div className='account-list-view'>
+          <div className='account-list-intro'><div><strong>{accounts.length} connected {accounts.length === 1 ? 'account' : 'accounts'}</strong><span>Choose exactly where each post is published.</span></div><button className='btn-primary' onClick={() => openAccountForm()}><UsersRound size={16} />Add account</button></div>
+          <div className='publishing-account-list'>{accounts.length === 0 ? <div className='account-list-empty'><UsersRound size={27} /><strong>No {platformLabels[platform]} accounts yet</strong><span>Add the first account to connect its folder and begin routing posts.</span><button className='btn-primary' onClick={() => openAccountForm()}>Add first account</button></div> : accounts.map(account => {
+            const items = uploads.filter(upload => upload.accountId === account.id);
+            const accountConnection = connections.find(item => item.accountId === account.id);
+            return <button className='publishing-account-row' key={account.id} onClick={() => setSelectedId(account.id)}><span className='publishing-account-icon'><CustomIcon platform={platform} size={28} /><i className={account.enabled ? 'online' : ''} /></span><span className='publishing-account-identity'><strong>{account.displayName}</strong><small>{account.handle}</small></span><span className='publishing-account-metric'><strong>{items.length}</strong><small>posts</small></span><span className='publishing-account-metric published'><strong>{items.filter(item => item.status === 'posted').length}</strong><small>published</small></span><span className={`publishing-account-source ${accountConnection ? 'connected' : ''}`}><FolderOpen size={15} />{accountConnection ? 'Folder connected' : 'Connect folder'}</span><ChevronRight size={18} /></button>;
+          })}</div>
+        </div>}
       </div>
     </div>
-  );
+  </div>;
 }
 
 function PostMediaPreview({ upload, compact = false, networkPreview = false }: { upload: PlatformUpload; compact?: boolean; networkPreview?: boolean }) {
@@ -1292,15 +1349,19 @@ function PlatformPostPreview({
 
 function NetworkPostPreview({
   upload,
+  account,
   title,
   caption,
 }: {
   upload: PlatformUpload;
+  account?: PlatformAccount;
   title: string;
   caption: string;
 }) {
   const displayTitle = title.trim() || upload.originalName;
   const postText = caption.trim() || (upload.platform === 'youtube' ? 'Write a description to see it here.' : 'Write a caption to see it here.');
+  const accountName = account?.displayName ?? 'Publishing account';
+  const accountHandle = account?.handle ?? '@account';
   const profile = (name: string, detail: string) => <div className='network-profile'><CustomIcon platform={upload.platform} size={30} /><span><strong>{name}</strong><small>{detail}</small></span><MoreHorizontal size={18} /></div>;
   const media = <div className={`network-media ${upload.mimeType.startsWith('video/') ? 'network-video' : ''}`}><PostMediaPreview upload={upload} networkPreview /></div>;
 
@@ -1309,22 +1370,22 @@ function NetworkPostPreview({
       <header><span>Live {platformLabels[upload.platform]} preview</span><small>Updates as you edit</small></header>
 
       {upload.platform === 'instagram' && <article className='network-post instagram-post'>
-        {profile('tinitiate.autobot', 'Preview')}
+        {profile(accountHandle, accountName)}
         {media}
         <div className='instagram-actions'><span><Heart size={19} /><MessageCircle size={19} /><Send size={18} /></span><Bookmark size={18} /></div>
         <span className='network-meta'>Preview engagement</span>
-        <p className='instagram-caption'><strong>tinitiate.autobot</strong> {postText}</p>
+        <p className='instagram-caption'><strong>{accountHandle}</strong> {postText}</p>
       </article>}
 
       {upload.platform === 'x' && <article className='network-post x-post'>
-        <div className='x-account'><CustomIcon platform='x' size={32} /><div><strong>Tinitiate Autobot</strong><span>@tinitiate · now</span></div><MoreHorizontal size={18} /></div>
+        <div className='x-account'><CustomIcon platform='x' size={32} /><div><strong>{accountName}</strong><span>{accountHandle} · now</span></div><MoreHorizontal size={18} /></div>
         <p className='x-copy'>{postText}</p>
         {media}
         <div className='x-actions'><MessageCircle size={15} /><Repeat2 size={16} /><Heart size={16} /><Eye size={16} /><Share2 size={15} /></div>
       </article>}
 
       {upload.platform === 'linkedin' && <article className='network-post linkedin-post'>
-        {profile('Tinitiate Autobot', '1,204 followers · now')}
+        {profile(accountName, `${accountHandle} · now`)}
         <p className='linkedin-copy'>{postText}</p>
         {media}
         <div className='linkedin-summary'><span><ThumbsUp size={13} /> <i /> <i /></span><small>Preview · Comment</small></div>
@@ -1332,7 +1393,7 @@ function NetworkPostPreview({
       </article>}
 
       {upload.platform === 'facebook' && <article className='network-post facebook-post'>
-        {profile('Tinitiate Autobot', 'Just now · Public')}
+        {profile(accountName, `${accountHandle} · Public`)}
         <p className='facebook-copy'>{postText}</p>
         {media}
         <div className='facebook-summary'><span><ThumbsUp size={13} /> <Heart size={13} /></span><small>Preview reactions</small></div>
@@ -1341,7 +1402,7 @@ function NetworkPostPreview({
 
       {upload.platform === 'youtube' && <article className='network-post youtube-post'>
         <div className='youtube-media'>{media}<span>0:00</span></div>
-        <div className='youtube-copy'><strong>{displayTitle}</strong><span>Tinitiate Autobot · Preview</span><p>{postText}</p></div>
+        <div className='youtube-copy'><strong>{displayTitle}</strong><span>{accountName} · {accountHandle}</span><p>{postText}</p></div>
       </article>}
 
       <p className='preview-note'>Content placement and media crop match the target network. The platform applies final fonts and metadata at publish time.</p>
@@ -1351,15 +1412,18 @@ function NetworkPostPreview({
 
 function EditPostModal({
   upload,
+  accounts,
   onClose,
   onSuccess,
 }: {
   upload: PlatformUpload;
+  accounts: PlatformAccount[];
   onClose: () => void;
   onSuccess: () => void;
 }) {
   const [title, setTitle] = useState(upload.title ?? upload.caption);
   const [caption, setCaption] = useState(upload.caption);
+  const [accountId, setAccountId] = useState(upload.accountId);
   const [schedule, setSchedule] = useState(
     upload.scheduledAt ? toLocalDateTimeInputValue(new Date(upload.scheduledAt)) : "",
   );
@@ -1383,6 +1447,7 @@ function EditPostModal({
         title: isYouTube ? title.trim() : undefined,
         caption: caption.trim(),
         scheduledAt: scheduledDate?.toISOString() ?? null,
+        accountId,
       });
       onSuccess();
       onClose();
@@ -1404,6 +1469,7 @@ function EditPostModal({
                 <CustomIcon platform={upload.platform} size={28} />
                 <div><strong>{upload.originalName}</strong><span>{platformLabels[upload.platform]}</span></div>
               </div>
+              <div className='field'><label>Publish through account</label><select value={accountId} onChange={event => setAccountId(event.target.value)} disabled={Boolean(upload.folderSource)}>{accounts.map(account => <option key={account.id} value={account.id}>{account.displayName} ({account.handle}){account.enabled ? '' : ' — paused'}</option>)}</select>{upload.folderSource && <small className='field-help'>This post is locked to the account that owns its source folder.</small>}</div>
               {isYouTube && (
                 <div className="field"><label>Video title</label><input type="text" value={title} onChange={event => setTitle(event.target.value)} /></div>
               )}
@@ -1416,7 +1482,7 @@ function EditPostModal({
                 <input type="datetime-local" min={minimumSchedule} value={schedule} onChange={event => setSchedule(event.target.value)} />
               </div>
             </div>
-            <NetworkPostPreview upload={upload} title={title} caption={caption} />
+            <NetworkPostPreview upload={upload} account={accounts.find(account => account.id === accountId)} title={title} caption={caption} />
           </div>
         </div>
         <div className="modal-foot">
