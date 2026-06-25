@@ -571,7 +571,7 @@ async function loginFormIsVisible(page: Page) {
   return Boolean(emailField && passwordField);
 }
 
-async function waitForLoginResult(page: Page, allowManualLoginFromStart = false) {
+async function waitForLoginResult(page: Page, allowManualLoginFromStart = false, ignoreLoginErrors = false) {
   await waitForLoginWithManualFallback({
     page,
     platform: "Facebook",
@@ -582,6 +582,7 @@ async function waitForLoginResult(page: Page, allowManualLoginFromStart = false)
     isLoginFormVisible: () => loginFormIsVisible(page),
     getLoginError: () => getLoginError(page),
     allowManualLoginFromStart,
+    ignoreLoginErrors,
   });
 }
 
@@ -594,10 +595,12 @@ export async function loginToFacebook(page: Page, _upload?: PlatformUpload, hold
   )?.trim();
   const resolvedEmail = accountLogin?.identifier?.trim() || email;
   const password = accountLogin?.password?.trim() || (process.env.FACEBOOK_PASSWORD ?? process.env.FB_PASSWORD)?.trim();
+  const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
+  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
   const credentialsConfigured = Boolean(resolvedEmail && password);
-  const autoLogin = process.env.FACEBOOK_AUTO_LOGIN !== "false" && credentialsConfigured;
+  const autoLogin = !savedSessionOnly && !manualLoginOnly && process.env.FACEBOOK_AUTO_LOGIN !== "false" && credentialsConfigured;
 
-  if (process.env.FACEBOOK_AUTO_LOGIN === "true" && !credentialsConfigured) {
+  if (!savedSessionOnly && !manualLoginOnly && process.env.FACEBOOK_AUTO_LOGIN === "true" && !credentialsConfigured) {
     throw new Error("Missing FACEBOOK_EMAIL/FACEBOOK_USERNAME or FACEBOOK_PASSWORD in .env");
   }
 
@@ -609,6 +612,15 @@ export async function loginToFacebook(page: Page, _upload?: PlatformUpload, hold
 
   if (await isLoggedIn(page)) {
     console.log("Facebook session already active.");
+  } else if (savedSessionOnly) {
+    throw new Error("Facebook saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
+  } else if (manualLoginOnly) {
+    console.log("Complete the full Facebook login manually in Chrome; bot will save the session after the account opens.");
+    await page.goto(FACEBOOK_LOGIN_URL, { timeout: 60000 });
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(1000);
+    await dismissCookiePrompt(page);
+    await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
   } else if (autoLogin && resolvedEmail && password) {
     console.log("Facebook session is not active. Trying automatic login because FACEBOOK_AUTO_LOGIN=true...");
     await page.goto(FACEBOOK_LOGIN_URL, { timeout: 60000 });
@@ -625,7 +637,7 @@ export async function loginToFacebook(page: Page, _upload?: PlatformUpload, hold
 
   if (!/facebook\.com\/?$|facebook\.com\/home/i.test(page.url())) {
     await page.goto(FACEBOOK_HOME_URL, { timeout: 60000 });
-    await waitForLoginResult(page, !autoLogin);
+    await waitForLoginResult(page, manualLoginOnly || !autoLogin, manualLoginOnly && Boolean(accountLogin?.ignoreLoginErrors));
   }
 
   await blockNotificationPrompt(page);

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
 import nodeCron from "node-cron";
+import pg, { type PoolClient } from "pg";
 import {
   type AutomationInput,
   type DashboardSummary,
@@ -22,6 +23,8 @@ import {
   platformSurfaces,
   platforms
 } from "../shared/schema";
+
+const { Pool } = pg;
 
 type AccountSecret = { encryptedPassword?: string; password?: string };
 
@@ -50,19 +53,19 @@ type StoredFileInput = {
 
 export type AutomationInputMode = "ready" | "scheduledOnly";
 export type PublishingAccount = PlatformAccount & { password?: string };
+export type AutomationRunTrigger = "manual" | "scheduler";
+export type AutomationRunStatus = "running" | "completed" | "failed";
+export type AutomationPostStatus = "processing" | "posted" | "failed";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const dataFile = resolveFromRoot(process.env.DATA_FILE ?? "./data/store.json");
 const localSecretKeyFile = resolveFromRoot(process.env.LOCAL_ACCOUNT_KEY_FILE ?? "./data/account-secret.key");
+const databaseUrl = process.env.SUPABASE_DATABASE_URL ?? process.env.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+const db = new Pool({ connectionString: databaseUrl });
 let storeMutationQueue: Promise<void> = Promise.resolve();
 let secretKeyPromise: Promise<Buffer> | null = null;
 
 function resolveFromRoot(candidate: string) {
   return path.isAbsolute(candidate) ? candidate : path.resolve(rootDir, candidate);
-}
-
-function emptyStore(): Store {
-  return { version: 3, accounts: [], accountSecrets: {}, schedules: [], socialMediaSchedules: [], uploads: [], folderConnections: [] };
 }
 
 function nowIso() {
@@ -105,21 +108,6 @@ async function decryptPassword(secret?: AccountSecret) {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
 }
 
-function primaryAccount(platform: Platform): PlatformAccount {
-  const timestamp = nowIso();
-  return {
-    id: `account_${platform}_primary`,
-    platform,
-    displayName: `${platformLabels[platform]} Primary`,
-    handle: platformHandles[platform],
-    loginIdentifier: "Existing browser session",
-    credentialConfigured: false,
-    enabled: true,
-    createdAt: timestamp,
-    updatedAt: timestamp
-  };
-}
-
 function createAutomation(platform: Platform, accountId: string, uploadId: string, sourceFileUrl: string) {
   return {
     schemaVersion: "autopost.upload.v1" as const,
@@ -159,69 +147,578 @@ function normalizeScheduleId(value: unknown) {
   return scheduleId;
 }
 
-function migrateStore(parsed: any): Store {
-  if (!Array.isArray(parsed?.uploads)) return emptyStore();
-
-  const accounts: PlatformAccount[] = Array.isArray(parsed.accounts) ? parsed.accounts : [];
-  const schedules = (Array.isArray(parsed.schedules) ? parsed.schedules : []) as PublishingSchedule[];
-  const socialMediaSchedules = (Array.isArray(parsed.socialMediaSchedules) ? parsed.socialMediaSchedules : []) as SocialMediaSchedule[];
-  const uploads = parsed.uploads as Array<PlatformUpload & { accountId?: string }>;
-  const folderConnections = (Array.isArray(parsed.folderConnections) ? parsed.folderConnections : []) as Array<FolderConnection & { accountId?: string }>;
-  const legacyPlatforms = new Set<Platform>();
-  uploads.forEach(upload => legacyPlatforms.add(upload.platform));
-  folderConnections.forEach(connection => legacyPlatforms.add(connection.platform));
-
-  for (const platform of legacyPlatforms) {
-    if (!accounts.some(account => account.platform === platform)) accounts.push(primaryAccount(platform));
-  }
-
-  const primaryId = (platform: Platform) => accounts.find(account => account.platform === platform)?.id ?? primaryAccount(platform).id;
-  const migratedUploads = uploads.map(upload => {
-    const accountId = upload.accountId || primaryId(upload.platform);
-    return {
-      ...upload,
-      accountId,
-      automation: createAutomation(upload.platform, accountId, upload.id, upload.url)
-    } as PlatformUpload;
-  });
-  const migratedConnections = folderConnections.map(connection => ({
-    ...connection,
-    accountId: connection.accountId || primaryId(connection.platform)
-  })) as FolderConnection[];
-
-  const store: Store = {
-    version: 3,
-    accounts,
-    accountSecrets: parsed.accountSecrets && typeof parsed.accountSecrets === "object" ? parsed.accountSecrets : {},
-    schedules,
-    socialMediaSchedules,
-    uploads: migratedUploads,
-    folderConnections: migratedConnections
-  };
-
-  return store;
+function isoString(value: unknown) {
+  if (!value) return undefined;
+  if (value instanceof Date) return value.toISOString();
+  const date = new Date(String(value));
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
 
-async function ensureStore() {
-  await fs.mkdir(path.dirname(dataFile), { recursive: true });
-  try {
-    await fs.access(dataFile);
-  } catch {
-    await writeStore(emptyStore());
-  }
+function dbTime(value: unknown) {
+  if (!value) return "00:00";
+  return String(value).slice(0, 5);
+}
+
+function dbDate(value: unknown) {
+  if (!value) return undefined;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function normalizeOptionalString(value: unknown) {
+  if (value === null || value === undefined || value === "") return undefined;
+  return String(value);
+}
+
+function normalizeFileName(row: any) {
+  const blobPath = normalizeOptionalString(row.azure_blob_path);
+  if (blobPath) return blobPath;
+  const blobUrl = normalizeOptionalString(row.azure_blob_url);
+  if (blobUrl) return path.basename(blobUrl);
+  return normalizeOptionalString(row.original_file_name) ?? row.id;
+}
+
+function asPlatform(value: unknown): Platform {
+  return value as Platform;
+}
+
+function asUploadStatus(value: unknown): UploadStatus {
+  return value as UploadStatus;
+}
+
+function accountFromRow(row: any): PlatformAccount {
+  return {
+    id: row.id,
+    platform: asPlatform(row.platform_name),
+    displayName: row.account_name,
+    handle: row.account_handle,
+    loginIdentifier: row.login_username,
+    loginConfirmation: normalizeOptionalString(row.login_note),
+    credentialConfigured: Boolean(row.has_saved_password),
+    enabled: Boolean(row.is_enabled),
+    createdAt: isoString(row.created_at) ?? nowIso(),
+    updatedAt: isoString(row.updated_at) ?? nowIso()
+  };
+}
+
+function scheduleFromRow(row: any): PublishingSchedule {
+  return {
+    id: Number(row.id),
+    name: row.schedule_name,
+    time: dbTime(row.publish_time),
+    frequency: row.repeat_type,
+    endDate: dbDate(row.end_date),
+    status: row.is_active ? "active" : "inactive",
+    customCronExpression: normalizeOptionalString(row.custom_cron),
+    lastRunAt: isoString(row.last_used_at),
+    createdAt: isoString(row.created_at) ?? nowIso(),
+    updatedAt: isoString(row.updated_at) ?? nowIso()
+  };
+}
+
+function folderConnectionFromRow(row: any): FolderConnection {
+  return {
+    id: row.id,
+    platform: asPlatform(row.platform_name),
+    accountId: row.publishing_account_id,
+    folderPath: row.folder_path,
+    createdAt: isoString(row.created_at) ?? nowIso(),
+    updatedAt: isoString(row.updated_at) ?? nowIso(),
+    lastScannedAt: isoString(row.last_scanned_at),
+    lastError: normalizeOptionalString(row.last_scan_error)
+  };
+}
+
+function uploadFromRow(row: any): PlatformUpload {
+  const platform = asPlatform(row.platform_name);
+  const accountId = row.publishing_account_id;
+  const fileName = normalizeFileName(row);
+  const url = normalizeOptionalString(row.azure_blob_url) ?? `/uploads/${fileName}`;
+  const folderSource = row.folder_connection_id
+    ? {
+        connectionId: row.folder_connection_id,
+        relativePath: row.folder_relative_path,
+        fingerprint: row.folder_file_fingerprint,
+        present: Boolean(row.folder_file_still_exists)
+      }
+    : undefined;
+
+  return {
+    id: row.id,
+    platform,
+    accountId,
+    originalName: normalizeOptionalString(row.original_file_name) ?? fileName,
+    fileName,
+    mimeType: normalizeOptionalString(row.mime_type) ?? "application/octet-stream",
+    extension: normalizeOptionalString(row.file_extension) ?? (path.extname(fileName).replace(".", "").toLowerCase() || "unknown"),
+    size: Number(row.file_size_bytes ?? 0),
+    url,
+    title: normalizeOptionalString(row.post_title),
+    caption: row.post_caption,
+    status: asUploadStatus(row.post_status),
+    uploadedAt: isoString(row.created_at) ?? nowIso(),
+    updatedAt: isoString(row.updated_at) ?? nowIso(),
+    scheduledAt: isoString(row.scheduled_publish_at),
+    scheduleId: row.schedule_template_id === null || row.schedule_template_id === undefined ? undefined : Number(row.schedule_template_id),
+    folderSource,
+    automation: createAutomation(platform, accountId, row.id, url)
+  };
 }
 
 async function readStore(): Promise<Store> {
-  await ensureStore();
-  const raw = await fs.readFile(dataFile, "utf8");
-  const parsed = JSON.parse(raw);
-  const store = migrateStore(parsed);
-  if (parsed.version !== 3) await writeStore(store);
-  return store;
+  const [
+    accountRows,
+    secretRows,
+    scheduleRows,
+    folderRows,
+    uploadRows
+  ] = await Promise.all([
+    db.query("select * from publishing_accounts order by platform_name, account_name"),
+    db.query("select * from publishing_account_secrets"),
+    db.query("select * from schedule_templates order by id"),
+    db.query("select * from connected_folders order by platform_name, folder_path"),
+    db.query(`
+      select
+        posts.*,
+        folder_post_sources.connected_folder_id as folder_connection_id,
+        folder_post_sources.relative_file_path as folder_relative_path,
+        folder_post_sources.file_fingerprint as folder_file_fingerprint,
+        folder_post_sources.file_still_exists as folder_file_still_exists
+      from posts
+      left join folder_post_sources on folder_post_sources.post_id = posts.id
+      order by posts.created_at desc
+    `)
+  ]);
+
+  const accountSecrets: Record<string, AccountSecret> = {};
+  for (const row of secretRows.rows) {
+    accountSecrets[row.publishing_account_id] = { encryptedPassword: row.encrypted_password };
+  }
+
+  return {
+    version: 3,
+    accounts: accountRows.rows.map(accountFromRow),
+    accountSecrets,
+    schedules: scheduleRows.rows.map(scheduleFromRow),
+    socialMediaSchedules: [],
+    uploads: uploadRows.rows.map(uploadFromRow),
+    folderConnections: folderRows.rows.map(folderConnectionFromRow)
+  };
+}
+
+async function deleteRowsMissing(client: PoolClient, tableName: string, idColumn: string, ids: Array<string | number>, idType: "text" | "bigint") {
+  if (ids.length === 0) {
+    await client.query(`delete from ${tableName}`);
+    return;
+  }
+
+  await client.query(`delete from ${tableName} where not (${idColumn} = any($1::${idType}[]))`, [ids]);
+}
+
+async function upsertAccount(client: PoolClient, account: PlatformAccount) {
+  await client.query(`
+    insert into publishing_accounts (
+      id,
+      platform_name,
+      account_name,
+      account_handle,
+      login_username,
+      login_note,
+      has_saved_password,
+      is_enabled,
+      created_at,
+      updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    on conflict (id) do update set
+      platform_name = excluded.platform_name,
+      account_name = excluded.account_name,
+      account_handle = excluded.account_handle,
+      login_username = excluded.login_username,
+      login_note = excluded.login_note,
+      has_saved_password = excluded.has_saved_password,
+      is_enabled = excluded.is_enabled,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+    where (
+      publishing_accounts.platform_name,
+      publishing_accounts.account_name,
+      publishing_accounts.account_handle,
+      publishing_accounts.login_username,
+      publishing_accounts.login_note,
+      publishing_accounts.has_saved_password,
+      publishing_accounts.is_enabled,
+      publishing_accounts.created_at,
+      publishing_accounts.updated_at
+    ) is distinct from (
+      excluded.platform_name,
+      excluded.account_name,
+      excluded.account_handle,
+      excluded.login_username,
+      excluded.login_note,
+      excluded.has_saved_password,
+      excluded.is_enabled,
+      excluded.created_at,
+      excluded.updated_at
+    )
+  `, [
+    account.id,
+    account.platform,
+    account.displayName,
+    account.handle,
+    account.loginIdentifier,
+    account.loginConfirmation ?? null,
+    account.credentialConfigured,
+    account.enabled,
+    account.createdAt,
+    account.updatedAt
+  ]);
+}
+
+async function upsertAccountSecret(client: PoolClient, accountId: string, secret: AccountSecret) {
+  if (!secret.encryptedPassword) return;
+
+  await client.query(`
+    insert into publishing_account_secrets (
+      publishing_account_id,
+      encrypted_password,
+      encryption_method
+    )
+    values ($1, $2, 'aes-256-gcm')
+    on conflict (publishing_account_id) do update set
+      encrypted_password = excluded.encrypted_password,
+      encryption_method = excluded.encryption_method
+    where (
+      publishing_account_secrets.encrypted_password,
+      publishing_account_secrets.encryption_method
+    ) is distinct from (
+      excluded.encrypted_password,
+      excluded.encryption_method
+    )
+  `, [accountId, secret.encryptedPassword]);
+}
+
+async function upsertSchedule(client: PoolClient, schedule: PublishingSchedule) {
+  await client.query(`
+    insert into schedule_templates (
+      id,
+      schedule_name,
+      publish_time,
+      timezone,
+      repeat_type,
+      end_date,
+      custom_cron,
+      is_active,
+      last_used_at,
+      created_at,
+      updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    on conflict (id) do update set
+      schedule_name = excluded.schedule_name,
+      publish_time = excluded.publish_time,
+      timezone = excluded.timezone,
+      repeat_type = excluded.repeat_type,
+      end_date = excluded.end_date,
+      custom_cron = excluded.custom_cron,
+      is_active = excluded.is_active,
+      last_used_at = excluded.last_used_at,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+    where (
+      schedule_templates.schedule_name,
+      schedule_templates.publish_time,
+      schedule_templates.timezone,
+      schedule_templates.repeat_type,
+      schedule_templates.end_date,
+      schedule_templates.custom_cron,
+      schedule_templates.is_active,
+      schedule_templates.last_used_at,
+      schedule_templates.created_at,
+      schedule_templates.updated_at
+    ) is distinct from (
+      excluded.schedule_name,
+      excluded.publish_time,
+      excluded.timezone,
+      excluded.repeat_type,
+      excluded.end_date,
+      excluded.custom_cron,
+      excluded.is_active,
+      excluded.last_used_at,
+      excluded.created_at,
+      excluded.updated_at
+    )
+  `, [
+    schedule.id,
+    schedule.name,
+    schedule.time,
+    process.env.SCHEDULER_TIMEZONE?.trim() || "Asia/Kolkata",
+    schedule.frequency,
+    schedule.endDate ?? null,
+    schedule.customCronExpression ?? null,
+    schedule.status === "active",
+    schedule.lastRunAt ?? null,
+    schedule.createdAt,
+    schedule.updatedAt
+  ]);
+}
+
+async function upsertFolderConnectionRow(client: PoolClient, connection: FolderConnection) {
+  await client.query(`
+    insert into connected_folders (
+      id,
+      publishing_account_id,
+      platform_name,
+      folder_path,
+      last_scanned_at,
+      last_scan_error,
+      is_active,
+      created_at,
+      updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, true, $7, $8)
+    on conflict (id) do update set
+      publishing_account_id = excluded.publishing_account_id,
+      platform_name = excluded.platform_name,
+      folder_path = excluded.folder_path,
+      last_scanned_at = excluded.last_scanned_at,
+      last_scan_error = excluded.last_scan_error,
+      is_active = excluded.is_active,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+    where (
+      connected_folders.publishing_account_id,
+      connected_folders.platform_name,
+      connected_folders.folder_path,
+      connected_folders.last_scanned_at,
+      connected_folders.last_scan_error,
+      connected_folders.is_active,
+      connected_folders.created_at,
+      connected_folders.updated_at
+    ) is distinct from (
+      excluded.publishing_account_id,
+      excluded.platform_name,
+      excluded.folder_path,
+      excluded.last_scanned_at,
+      excluded.last_scan_error,
+      excluded.is_active,
+      excluded.created_at,
+      excluded.updated_at
+    )
+  `, [
+    connection.id,
+    connection.accountId,
+    connection.platform,
+    connection.folderPath,
+    connection.lastScannedAt ?? null,
+    connection.lastError ?? null,
+    connection.createdAt,
+    connection.updatedAt
+  ]);
+}
+
+async function upsertUpload(client: PoolClient, upload: PlatformUpload) {
+  await client.query(`
+    insert into posts (
+      id,
+      publishing_account_id,
+      platform_name,
+      post_title,
+      post_caption,
+      post_status,
+      azure_blob_path,
+      azure_blob_url,
+      original_file_name,
+      media_file_type,
+      mime_type,
+      file_extension,
+      file_size_bytes,
+      scheduled_publish_at,
+      schedule_template_id,
+      published_at,
+      created_at,
+      updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    on conflict (id) do update set
+      publishing_account_id = excluded.publishing_account_id,
+      platform_name = excluded.platform_name,
+      post_title = excluded.post_title,
+      post_caption = excluded.post_caption,
+      post_status = excluded.post_status,
+      azure_blob_path = excluded.azure_blob_path,
+      azure_blob_url = excluded.azure_blob_url,
+      original_file_name = excluded.original_file_name,
+      media_file_type = excluded.media_file_type,
+      mime_type = excluded.mime_type,
+      file_extension = excluded.file_extension,
+      file_size_bytes = excluded.file_size_bytes,
+      scheduled_publish_at = excluded.scheduled_publish_at,
+      schedule_template_id = excluded.schedule_template_id,
+      published_at = case
+        when excluded.post_status = 'posted' then coalesce(posts.published_at, excluded.published_at, now())
+        else null
+      end,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+    where (
+      posts.publishing_account_id,
+      posts.platform_name,
+      posts.post_title,
+      posts.post_caption,
+      posts.post_status,
+      posts.azure_blob_path,
+      posts.azure_blob_url,
+      posts.original_file_name,
+      posts.media_file_type,
+      posts.mime_type,
+      posts.file_extension,
+      posts.file_size_bytes,
+      posts.scheduled_publish_at,
+      posts.schedule_template_id,
+      posts.published_at,
+      posts.created_at,
+      posts.updated_at
+    ) is distinct from (
+      excluded.publishing_account_id,
+      excluded.platform_name,
+      excluded.post_title,
+      excluded.post_caption,
+      excluded.post_status,
+      excluded.azure_blob_path,
+      excluded.azure_blob_url,
+      excluded.original_file_name,
+      excluded.media_file_type,
+      excluded.mime_type,
+      excluded.file_extension,
+      excluded.file_size_bytes,
+      excluded.scheduled_publish_at,
+      excluded.schedule_template_id,
+      excluded.published_at,
+      excluded.created_at,
+      excluded.updated_at
+    )
+  `, [
+    upload.id,
+    upload.accountId,
+    upload.platform,
+    upload.title ?? null,
+    upload.caption,
+    upload.status,
+    upload.fileName,
+    upload.url,
+    upload.originalName,
+    upload.mimeType.startsWith("image/") ? "image" : upload.mimeType.startsWith("video/") ? "video" : "other",
+    upload.mimeType,
+    upload.extension,
+    upload.size,
+    upload.scheduledAt ?? null,
+    upload.scheduleId ?? null,
+    upload.status === "posted" ? upload.updatedAt : null,
+    upload.uploadedAt,
+    upload.updatedAt
+  ]);
+}
+
+async function upsertFolderSource(client: PoolClient, upload: PlatformUpload) {
+  if (!upload.folderSource) return;
+
+  await client.query(`
+    insert into folder_post_sources (
+      post_id,
+      connected_folder_id,
+      relative_file_path,
+      file_fingerprint,
+      file_still_exists,
+      created_at,
+      updated_at
+    )
+    values ($1, $2, $3, $4, $5, $6, $7)
+    on conflict (post_id) do update set
+      connected_folder_id = excluded.connected_folder_id,
+      relative_file_path = excluded.relative_file_path,
+      file_fingerprint = excluded.file_fingerprint,
+      file_still_exists = excluded.file_still_exists,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+    where (
+      folder_post_sources.connected_folder_id,
+      folder_post_sources.relative_file_path,
+      folder_post_sources.file_fingerprint,
+      folder_post_sources.file_still_exists,
+      folder_post_sources.created_at,
+      folder_post_sources.updated_at
+    ) is distinct from (
+      excluded.connected_folder_id,
+      excluded.relative_file_path,
+      excluded.file_fingerprint,
+      excluded.file_still_exists,
+      excluded.created_at,
+      excluded.updated_at
+    )
+  `, [
+    upload.id,
+    upload.folderSource.connectionId,
+    upload.folderSource.relativePath,
+    upload.folderSource.fingerprint,
+    upload.folderSource.present,
+    upload.uploadedAt,
+    upload.updatedAt
+  ]);
 }
 
 async function writeStore(store: Store) {
-  await fs.writeFile(dataFile, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  const client = await db.connect();
+  try {
+    await client.query("begin");
+
+    const accountIds = store.accounts.map(account => account.id);
+    const secretAccountIds = Object.entries(store.accountSecrets)
+      .filter(([, secret]) => secret.encryptedPassword)
+      .map(([accountId]) => accountId);
+    const scheduleIds = store.schedules.map(schedule => schedule.id);
+    const uploadIds = store.uploads.map(upload => upload.id);
+    const folderConnectionIds = store.folderConnections.map(connection => connection.id);
+    const activeFolderConnectionIds = new Set(folderConnectionIds);
+    const folderSourceUploadIds = store.uploads
+      .filter(upload => upload.folderSource && activeFolderConnectionIds.has(upload.folderSource.connectionId))
+      .map(upload => upload.id);
+
+    await deleteRowsMissing(client, "folder_post_sources", "post_id", folderSourceUploadIds, "text");
+    await deleteRowsMissing(client, "posts", "id", uploadIds, "text");
+    await deleteRowsMissing(client, "connected_folders", "id", folderConnectionIds, "text");
+    await deleteRowsMissing(client, "publishing_account_secrets", "publishing_account_id", secretAccountIds, "text");
+    await deleteRowsMissing(client, "schedule_templates", "id", scheduleIds, "bigint");
+    await deleteRowsMissing(client, "publishing_accounts", "id", accountIds, "text");
+
+    for (const account of store.accounts) await upsertAccount(client, account);
+    for (const [accountId, secret] of Object.entries(store.accountSecrets)) await upsertAccountSecret(client, accountId, secret);
+    for (const schedule of store.schedules) await upsertSchedule(client, schedule);
+    for (const connection of store.folderConnections) await upsertFolderConnectionRow(client, connection);
+    for (const upload of store.uploads) await upsertUpload(client, upload);
+    for (const upload of store.uploads) {
+      if (upload.folderSource && activeFolderConnectionIds.has(upload.folderSource.connectionId)) {
+        await upsertFolderSource(client, upload);
+      }
+    }
+
+    if (store.schedules.length > 0) {
+      await client.query(`
+        select setval(
+          pg_get_serial_sequence('schedule_templates', 'id'),
+          greatest(coalesce((select max(id) from schedule_templates), 1), 1),
+          true
+        )
+      `);
+    }
+
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function mutateStore<T>(mutator: (store: Store) => T | Promise<T>) {
@@ -233,6 +730,93 @@ async function mutateStore<T>(mutator: (store: Store) => T | Promise<T>) {
   });
   storeMutationQueue = operation.then(() => undefined, () => undefined);
   return operation;
+}
+
+async function insertPostStatusHistory(
+  postId: string,
+  oldStatus: UploadStatus | null,
+  newStatus: UploadStatus,
+  changeReason: string,
+  changedAt = nowIso(),
+) {
+  await db.query(`
+    insert into post_status_history (
+      post_id,
+      old_status,
+      new_status,
+      change_reason,
+      changed_at
+    )
+    values ($1, $2, $3, $4, $5)
+  `, [postId, oldStatus, newStatus, changeReason, changedAt]);
+}
+
+export async function createAutomationRun(trigger: AutomationRunTrigger) {
+  const result = await db.query<{ id: string }>(`
+    insert into automation_runs (
+      run_trigger,
+      run_status,
+      started_at,
+      created_at
+    )
+    values ($1, 'running', now(), now())
+    returning id
+  `, [trigger]);
+
+  return result.rows[0].id;
+}
+
+export async function finishAutomationRun(
+  automationRunId: string,
+  status: Exclude<AutomationRunStatus, "running">,
+  errorMessage?: string,
+) {
+  await db.query(`
+    update automation_runs
+    set
+      run_status = $2,
+      finished_at = now(),
+      error_message = $3
+    where id = $1
+  `, [automationRunId, status, errorMessage ?? null]);
+}
+
+export async function createAutomationRunPost(automationRunId: string, upload: PlatformUpload) {
+  const result = await db.query<{ id: string }>(`
+    insert into automation_run_posts (
+      automation_run_id,
+      post_id,
+      publishing_account_id,
+      platform_name,
+      publish_status,
+      started_at,
+      created_at
+    )
+    values ($1, $2, $3, $4, 'processing', now(), now())
+    returning id
+  `, [
+    automationRunId,
+    upload.id,
+    upload.accountId,
+    upload.platform,
+  ]);
+
+  return result.rows[0].id;
+}
+
+export async function finishAutomationRunPost(
+  automationRunPostId: string,
+  status: AutomationPostStatus,
+  failureMessage?: string,
+) {
+  await db.query(`
+    update automation_run_posts
+    set
+      publish_status = $2,
+      finished_at = now(),
+      failure_message = $3
+    where id = $1
+  `, [automationRunPostId, status, failureMessage ?? null]);
 }
 
 function scheduledTime(upload: PlatformUpload) {
@@ -600,7 +1184,7 @@ export async function listUploads(platform?: Platform, accountId?: string) {
 }
 
 export async function createUpload(accountId: string, file: StoredFileInput) {
-  return mutateStore(store => {
+  const upload = await mutateStore(store => {
     const account = store.accounts.find(item => item.id === accountId);
     if (!account) throw new Error("Publishing account not found.");
     if (!account.enabled) throw new Error("This publishing account is disabled.");
@@ -630,16 +1214,31 @@ export async function createUpload(accountId: string, file: StoredFileInput) {
     store.uploads.unshift(upload);
     return upload;
   });
+
+  await insertPostStatusHistory(upload.id, null, "queued", "Post created", upload.uploadedAt);
+  return upload;
 }
 
-export async function updateUploadStatus(uploadId: string, status: UploadStatus) {
-  return mutateStore(store => {
+export async function updateUploadStatus(uploadId: string, status: UploadStatus, changeReason = "Post status updated") {
+  let oldStatus: UploadStatus | null = null;
+  let statusChanged = false;
+  const changedAt = nowIso();
+
+  const updated = await mutateStore(store => {
     const index = store.uploads.findIndex(upload => upload.id === uploadId);
     if (index === -1) return null;
-    const updated = { ...store.uploads[index], status, updatedAt: nowIso() };
+    oldStatus = store.uploads[index].status;
+    statusChanged = oldStatus !== status;
+    const updated = { ...store.uploads[index], status, updatedAt: changedAt };
     store.uploads[index] = updated;
     return updated;
   });
+
+  if (updated && statusChanged) {
+    await insertPostStatusHistory(uploadId, oldStatus, status, changeReason, changedAt);
+  }
+
+  return updated;
 }
 
 export async function deleteUpload(uploadId: string) {
@@ -653,7 +1252,11 @@ export async function deleteUpload(uploadId: string) {
 
 export async function updateUploadDetails(uploadId: string, input: UpdateUploadDetailsInput) {
   const selectedScheduleId = input.scheduleId === null ? undefined : normalizeScheduleId(input.scheduleId);
-  return mutateStore(store => {
+  let oldStatus: UploadStatus | null = null;
+  let statusChanged = false;
+  const changedAt = nowIso();
+
+  const updatedUpload = await mutateStore(store => {
     const index = store.uploads.findIndex(upload => upload.id === uploadId);
     if (index === -1) return null;
     const existing = store.uploads[index];
@@ -671,6 +1274,8 @@ export async function updateUploadDetails(uploadId: string, input: UpdateUploadD
     }
     const nextScheduledAt = input.scheduledAt === null || selectedScheduleId ? undefined : input.scheduledAt ?? existing.scheduledAt;
     const nextScheduleId = input.scheduledAt ? undefined : input.scheduleId === undefined ? existing.scheduleId : selectedScheduleId;
+    oldStatus = existing.status;
+    statusChanged = oldStatus !== "queued";
     const updated: PlatformUpload = {
       ...existing,
       accountId,
@@ -679,12 +1284,18 @@ export async function updateUploadDetails(uploadId: string, input: UpdateUploadD
       scheduledAt: nextScheduledAt,
       scheduleId: nextScheduleId,
       status: "queued",
-      updatedAt: nowIso(),
+      updatedAt: changedAt,
       automation: createAutomation(existing.platform, accountId, existing.id, existing.url)
     };
     store.uploads[index] = updated;
     return updated;
   });
+
+  if (updatedUpload && statusChanged) {
+    await insertPostStatusHistory(uploadId, oldStatus, "queued", "Post details updated and requeued", changedAt);
+  }
+
+  return updatedUpload;
 }
 
 export async function listFolderConnections() {

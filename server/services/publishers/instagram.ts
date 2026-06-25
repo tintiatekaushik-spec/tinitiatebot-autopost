@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
-import type { AccountLogin } from "./manual-login.js";
+import { waitForLoginWithManualFallback, type AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -205,6 +205,38 @@ async function fillLoginForm(page: Page, username: string, password: string) {
   );
 
   await clickLogIn(page);
+}
+
+async function loginFormIsVisible(page: Page) {
+  const usernameField = await firstVisible([
+    page.getByLabel(/Phone number, username, or email/i),
+    page.locator('input[name="username"]'),
+    page.locator('input[autocomplete="username"]'),
+    page.locator('input[type="text"]'),
+  ]);
+  const passwordField = await firstVisible([
+    page.getByLabel(/^Password$/i),
+    page.locator('input[name="password"]'),
+    page.locator('input[autocomplete="current-password"]'),
+    page.locator('input[type="password"]'),
+  ]);
+  return Boolean(usernameField && passwordField);
+}
+
+async function isManualVerificationVisible(page: Page, url: string) {
+  if (/challenge|two_factor|checkpoint|captcha|suspended|disabled/i.test(url)) return true;
+
+  const signal = await firstVisible([
+    page.getByText(/Confirm your account/i),
+    page.getByText(/Enter security code/i),
+    page.getByText(/Check your email/i),
+    page.getByText(/Verify your account/i),
+    page.getByText(/two-factor authentication/i),
+    page.locator('iframe[title*="captcha" i]'),
+    page.locator('iframe[src*="captcha" i]'),
+  ]);
+
+  return Boolean(signal);
 }
 
 async function dismissPostLoginPrompts(page: Page) {
@@ -530,60 +562,55 @@ async function clickInstagramShareAndWait(page: Page) {
   await clickDoneAfterInstagramShared(page);
 }
 
-async function waitForLoginResult(page: Page) {
-  const deadline = Date.now() + 90000;
-
-  while (Date.now() < deadline) {
-    const url = page.url();
-
-    if (/challenge|two_factor|checkpoint|captcha|suspended|disabled/i.test(url)) {
-      throw new Error("Instagram requires manual verification before automation can continue.");
-    }
-
-    const loginError = await getLoginError(page);
-    if (loginError) {
-      throw new Error(`Instagram login error: ${loginError}`);
-    }
-
-    await dismissPostLoginPrompts(page);
-
-    if (await isLoggedIn(page)) {
-      console.log("Instagram login confirmed.");
-      return;
-    }
-
-    await page.waitForTimeout(500);
-  }
-
-  throw new Error("Instagram login did not finish within 90 seconds.");
+async function waitForLoginResult(page: Page, allowManualLoginFromStart = false, ignoreLoginErrors = false) {
+  await waitForLoginWithManualFallback({
+    page,
+    platform: "Instagram",
+    normalTimeoutMs: 90000,
+    pollMs: 500,
+    isLoggedIn: () => isLoggedIn(page),
+    isManualVerificationVisible: (url) => isManualVerificationVisible(page, url),
+    isLoginFormVisible: () => loginFormIsVisible(page),
+    getLoginError: () => getLoginError(page),
+    beforeCheck: () => dismissPostLoginPrompts(page),
+    allowManualLoginFromStart,
+    ignoreLoginErrors,
+  });
 }
 
 export async function loginToInstagram(page: Page, _upload?: PlatformUpload, holdAfterLogin = true, accountLogin?: AccountLogin) {
   const username = accountLogin?.identifier?.trim() || (process.env.INSTAGRAM_EMAIL ?? process.env.INSTAGRAM_USERNAME)?.trim();
   const password = accountLogin?.password?.trim() || process.env.INSTAGRAM_PASSWORD?.trim();
+  const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
+  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
 
-  if (!username || !password) {
+  if (!savedSessionOnly && !manualLoginOnly && (!username || !password)) {
     throw new Error("Missing INSTAGRAM_EMAIL/INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD in .env");
   }
 
-  console.log("Navigating to Instagram login page...");
-  await page.goto(INSTAGRAM_LOGIN_URL, { timeout: 60000 });
+  console.log(`Navigating to Instagram ${savedSessionOnly ? "home" : "login"} page...`);
+  await page.goto(savedSessionOnly ? INSTAGRAM_HOME_URL : INSTAGRAM_LOGIN_URL, { timeout: 60000 });
   await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(1000);
   await dismissCookiePrompt(page);
-  await clickLoginInterstitialLink(page);
+  if (!savedSessionOnly && !manualLoginOnly) await clickLoginInterstitialLink(page);
 
   if (await isLoggedIn(page)) {
     console.log("Instagram session already active.");
+  } else if (savedSessionOnly) {
+    throw new Error("Instagram saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
+  } else if (manualLoginOnly) {
+    console.log("Complete the full Instagram login manually in Chrome; bot will save the session after the account opens.");
+    await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
   } else {
     console.log("Filling Instagram credentials...");
-    await fillLoginForm(page, username, password);
+    await fillLoginForm(page, username!, password!);
     console.log("Waiting for Instagram login to process...");
     await waitForLoginResult(page);
   }
 
   await page.goto(INSTAGRAM_HOME_URL, { timeout: 60000 });
-  await waitForLoginResult(page);
+  await waitForLoginResult(page, manualLoginOnly, manualLoginOnly && Boolean(accountLogin?.ignoreLoginErrors));
 
   if (holdAfterLogin) {
     const holdTime = getLoginHoldMs();

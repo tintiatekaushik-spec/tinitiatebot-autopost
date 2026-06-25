@@ -395,7 +395,7 @@ async function fillAutomaticLogin(page: Page, identifier: string, password: stri
   console.log("X Log in clicked.");
 }
 
-async function waitForLoginResult(page: Page, allowManualLoginFromStart: boolean) {
+async function waitForLoginResult(page: Page, allowManualLoginFromStart: boolean, ignoreLoginErrors = false) {
   await waitForLoginWithManualFallback({
     page,
     platform: "X",
@@ -407,6 +407,7 @@ async function waitForLoginResult(page: Page, allowManualLoginFromStart: boolean
     getLoginError: () => getLoginError(page),
     beforeCheck: () => dismissCookiePrompt(page),
     allowManualLoginFromStart,
+    ignoreLoginErrors,
   });
 }
 
@@ -417,7 +418,9 @@ export async function loginToX(page: Page, _upload?: PlatformUpload, holdAfterLo
   const password = accountLogin?.password?.trim() || (process.env.X_PASSWORD ?? process.env.TWITTER_PASSWORD)?.trim();
   const identifier = accountLogin?.identifier?.trim() || email || username || phone;
   const confirmation = accountLogin?.confirmation?.trim() || process.env.X_LOGIN_CONFIRMATION?.trim() || username || phone || email || "";
-  const automaticLogin = process.env.X_AUTO_LOGIN !== "false" && Boolean(identifier && password);
+  const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
+  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
+  const automaticLogin = !savedSessionOnly && !manualLoginOnly && process.env.X_AUTO_LOGIN !== "false" && Boolean(identifier && password);
 
   console.log("Navigating to X...");
   await page.goto(X_HOME_URL, { timeout: 60000, waitUntil: "domcontentloaded" });
@@ -426,12 +429,17 @@ export async function loginToX(page: Page, _upload?: PlatformUpload, holdAfterLo
 
   if (await isLoggedIn(page)) {
     console.log("X session already active.");
+  } else if (savedSessionOnly) {
+    throw new Error("X saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
   } else {
     await page.goto(X_LOGIN_URL, { timeout: 60000, waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
     await dismissCookiePrompt(page);
 
-    if (automaticLogin && identifier && password) {
+    if (manualLoginOnly) {
+      console.log("Complete the full X login manually in Chrome; bot will save the session after the account opens.");
+      await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
+    } else if (automaticLogin && identifier && password) {
       console.log("X session is not active. Trying automatic login...");
       await fillAutomaticLogin(page, identifier, password, confirmation || identifier);
       await waitForLoginResult(page, true);
@@ -443,7 +451,7 @@ export async function loginToX(page: Page, _upload?: PlatformUpload, holdAfterLo
 
   if (!/x\.com\/home/i.test(page.url())) {
     await page.goto(X_HOME_URL, { timeout: 60000, waitUntil: "domcontentloaded" });
-    await waitForLoginResult(page, false);
+    await waitForLoginResult(page, manualLoginOnly, Boolean(accountLogin?.ignoreLoginErrors));
   }
 
   if (holdAfterLogin) {

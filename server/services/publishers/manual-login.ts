@@ -4,6 +4,9 @@ export type AccountLogin = {
   identifier?: string;
   password?: string;
   confirmation?: string;
+  useSavedSessionOnly?: boolean;
+  forceManualLogin?: boolean;
+  ignoreLoginErrors?: boolean;
 };
 
 type ManualLoginFallbackOptions = {
@@ -18,6 +21,7 @@ type ManualLoginFallbackOptions = {
   beforeCheck?: () => Promise<void>;
   shouldAbort?: (url: string) => Promise<string | null> | string | null;
   allowManualLoginFromStart?: boolean;
+  ignoreLoginErrors?: boolean;
 };
 
 export function getManualActionTimeoutMs() {
@@ -36,6 +40,7 @@ export async function waitForLoginWithManualFallback({
   beforeCheck,
   shouldAbort,
   allowManualLoginFromStart = false,
+  ignoreLoginErrors = false,
 }: ManualLoginFallbackOptions) {
   const normalDeadline = Date.now() + normalTimeoutMs;
   let manualDeadline: number | null = null;
@@ -43,6 +48,7 @@ export async function waitForLoginWithManualFallback({
   let manualWasVisible = false;
   let manualClearedLogged = false;
   let manualLoginFallbackLogged = false;
+  let ignoredLoginErrorLogged = false;
 
   while (Date.now() < (manualDeadline ?? normalDeadline)) {
     const url = page.url();
@@ -54,7 +60,16 @@ export async function waitForLoginWithManualFallback({
 
     const loginError = await getLoginError?.();
     if (loginError) {
-      throw new Error(`${platform} login error: ${loginError}`);
+      if (!ignoreLoginErrors) throw new Error(`${platform} login error: ${loginError}`);
+      manualDeadline ??= Date.now() + getManualActionTimeoutMs();
+      if (!ignoredLoginErrorLogged) {
+        ignoredLoginErrorLogged = true;
+        console.log(
+          `${platform} login page is showing: ${loginError}. Complete login manually in Chrome; bot will keep waiting for up to ${Math.round(
+            getManualActionTimeoutMs() / 1000,
+          )} seconds.`,
+        );
+      }
     }
 
     await beforeCheck?.();
@@ -67,7 +82,7 @@ export async function waitForLoginWithManualFallback({
     const loginFormVisible = isLoginFormVisible ? await isLoginFormVisible() : false;
     const manualVisible = await isManualVerificationVisible(url);
 
-    if (allowManualLoginFromStart && loginFormVisible) {
+    if (allowManualLoginFromStart) {
       if (!manualLoginFallbackLogged) {
         manualDeadline = Date.now() + getManualActionTimeoutMs();
         manualLoginFallbackLogged = true;

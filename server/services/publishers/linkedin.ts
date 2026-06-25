@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
-import type { AccountLogin } from "./manual-login.js";
+import { waitForLoginWithManualFallback, type AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -383,55 +383,87 @@ async function fillLoginForm(page: Page, email: string, password: string) {
   console.log("Clicked LinkedIn Sign in.");
 }
 
-async function waitForLoginResult(page: Page) {
-  const deadline = Date.now() + 60000;
+async function loginFormIsVisible(page: Page) {
+  const emailField = await firstVisible([
+    page.getByLabel(/Email or phone/i),
+    page.getByRole("textbox", { name: /Email or phone/i }),
+    page.locator("input#username"),
+    page.locator('input[name="session_key"]'),
+    page.locator('input[autocomplete="username"]'),
+    page.locator('input[type="email"]'),
+    page.locator('input[type="text"]'),
+  ]);
+  const passwordField = await firstVisible([
+    page.getByLabel(/^Password$/i),
+    page.locator("input#password"),
+    page.locator('input[name="session_password"]'),
+    page.locator('input[autocomplete="current-password"]'),
+    page.locator('input[type="password"]'),
+  ]);
+  return Boolean(emailField && passwordField);
+}
 
-  while (Date.now() < deadline) {
-    const url = page.url();
+async function isManualVerificationVisible(page: Page, url: string) {
+  if (/checkpoint|challenge|captcha|verification/i.test(url)) return true;
 
-    if (/checkpoint|challenge|captcha|verification/i.test(url)) {
-      throw new Error("LinkedIn requires manual verification before automation can continue.");
-    }
+  const signal = await firstVisible([
+    page.getByText(/security verification/i),
+    page.getByText(/verify your identity/i),
+    page.getByText(/verification code/i),
+    page.getByText(/two-step verification/i),
+    page.locator('iframe[title*="captcha" i]'),
+    page.locator('iframe[src*="captcha" i]'),
+  ]);
 
-    const loginError = await getLoginError(page);
-    if (loginError) {
-      throw new Error(`LinkedIn login error: ${loginError}`);
-    }
+  return Boolean(signal);
+}
 
-    if (await isLoggedIn(page)) {
-      console.log("LinkedIn login confirmed.");
-      return;
-    }
-
-    await page.waitForTimeout(1000);
-  }
-
-  throw new Error("LinkedIn login did not finish within 60 seconds.");
+async function waitForLoginResult(page: Page, allowManualLoginFromStart = false, ignoreLoginErrors = false) {
+  await waitForLoginWithManualFallback({
+    page,
+    platform: "LinkedIn",
+    normalTimeoutMs: 90000,
+    pollMs: 500,
+    isLoggedIn: () => isLoggedIn(page),
+    isManualVerificationVisible: (url) => isManualVerificationVisible(page, url),
+    isLoginFormVisible: () => loginFormIsVisible(page),
+    getLoginError: () => getLoginError(page),
+    beforeCheck: () => dismissCookiePrompt(page),
+    allowManualLoginFromStart,
+    ignoreLoginErrors,
+  });
 }
 
 export async function loginToLinkedIn(page: Page, _upload?: PlatformUpload, accountLogin?: AccountLogin) {
   const email = accountLogin?.identifier?.trim() || process.env.LINKEDIN_EMAIL?.trim();
   const password = accountLogin?.password?.trim() || process.env.LINKEDIN_PASSWORD?.trim();
+  const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
+  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
 
-  if (!email || !password) throw new Error("Missing LINKEDIN_EMAIL or LINKEDIN_PASSWORD in .env");
+  if (!savedSessionOnly && !manualLoginOnly && (!email || !password)) throw new Error("Missing LINKEDIN_EMAIL or LINKEDIN_PASSWORD in .env");
 
-  console.log("Navigating to LinkedIn login page...");
-  await page.goto(LINKEDIN_LOGIN_URL, { timeout: 60000 });
+  console.log(`Navigating to LinkedIn ${savedSessionOnly ? "feed" : "login"} page...`);
+  await page.goto(savedSessionOnly ? LINKEDIN_FEED_URL : LINKEDIN_LOGIN_URL, { timeout: 60000 });
   await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(2000);
   await dismissCookiePrompt(page);
 
   if (await isLoggedIn(page)) {
     console.log("LinkedIn session already active.");
+  } else if (savedSessionOnly) {
+    throw new Error("LinkedIn saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
+  } else if (manualLoginOnly) {
+    console.log("Complete the full LinkedIn login manually in Chrome; bot will save the session after the account opens.");
+    await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
   } else {
     console.log("Filling LinkedIn credentials...");
-    await fillLoginForm(page, email, password);
+    await fillLoginForm(page, email!, password!);
     console.log("Waiting for LinkedIn login to process...");
     await waitForLoginResult(page);
   }
 
   await page.goto(LINKEDIN_FEED_URL, { timeout: 60000 });
-  await waitForLoginResult(page);
+  await waitForLoginResult(page, manualLoginOnly, manualLoginOnly && Boolean(accountLogin?.ignoreLoginErrors));
 
   console.log("LinkedIn ready.");
   return { success: true };

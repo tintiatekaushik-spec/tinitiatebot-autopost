@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { PlatformUpload } from "../../../shared/schema.js";
-import type { AccountLogin } from "./manual-login.js";
+import { waitForLoginWithManualFallback, type AccountLogin } from "./manual-login.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -11,6 +11,7 @@ const rootDir = path.resolve(__dirname, "../../..");
 
 const YES_MADE_FOR_KIDS_TEXT = /Yes.*made for kids/i;
 const PUBLIC_VISIBILITY_TEXT = /Public/i;
+const YOUTUBE_UPLOAD_URL = "https://www.youtube.com/upload";
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -23,6 +24,36 @@ async function clickIfVisible(locator: Locator, timeout = 1500) {
   } catch {
     return false;
   }
+}
+
+async function firstVisible(locators: Locator[]) {
+  for (const locator of locators) {
+    const count = await locator.count().catch(() => 0);
+
+    for (let index = 0; index < Math.min(count, 8); index += 1) {
+      const candidate = locator.nth(index);
+
+      try {
+        if (await candidate.isVisible()) return candidate;
+      } catch {
+        // Try the next matching element.
+      }
+    }
+  }
+
+  return null;
+}
+
+async function waitForVisible(locators: Locator[], timeout = 30000) {
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    const locator = await firstVisible(locators);
+    if (locator) return locator;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  return null;
 }
 
 async function dismissChromeSignInPrompt(page: Page) {
@@ -350,47 +381,174 @@ async function waitForPublishComplete(page: Page) {
   throw new Error("Publish confirmation appeared, but the Close button could not be clicked.");
 }
 
-export async function postToYouTube(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
+function isGoogleSignInUrl(url: string) {
+  return /accounts\.google\.com|signin/i.test(url);
+}
+
+async function isYouTubeLoggedIn(page: Page) {
+  if (isGoogleSignInUrl(page.url())) return false;
+
+  const loggedInSignals = [
+    page.locator('input[type="file"]'),
+    page.locator("ytcp-uploads-dialog"),
+    page.getByText(/Upload videos/i),
+    page.locator("button#avatar-btn"),
+    page.locator("ytd-topbar-menu-button-renderer button#avatar-btn"),
+    page.locator('a[href*="/feed/you"]'),
+    page.locator("ytcp-button#create-icon"),
+    page.getByRole("button", { name: /Create/i }),
+  ];
+
+  return Boolean(await firstVisible(loggedInSignals));
+}
+
+async function googleLoginFormIsVisible(page: Page) {
+  return Boolean(await firstVisible([
+    page.locator("#identifierId"),
+    page.locator('input[type="email"]'),
+    page.locator('input[type="password"]'),
+  ]));
+}
+
+async function isGoogleManualVerificationVisible(page: Page, url: string) {
+  if (/challenge|captcha|verification|two.?step|2fa|signin\/v2\/challenge/i.test(url)) return true;
+
+  const signal = await firstVisible([
+    page.getByText(/verify it's you/i),
+    page.getByText(/2-Step Verification/i),
+    page.getByText(/Enter a verification code/i),
+    page.getByText(/Check your phone/i),
+    page.getByText(/Confirm it's you/i),
+    page.locator('iframe[title*="captcha" i]'),
+    page.locator('iframe[src*="captcha" i]'),
+  ]);
+
+  return Boolean(signal);
+}
+
+async function getGoogleLoginError(page: Page) {
+  if (!isGoogleSignInUrl(page.url())) return null;
+
+  const errorPattern =
+    /wrong password|couldn['’]t sign you in|couldn['’]t find your google account|enter a valid email|that password is incorrect|try again later|too many failed attempts|suspicious activity|account has been disabled/i;
+  const locators = [
+    page.locator('[aria-live="assertive"]'),
+    page.locator('[role="alert"]'),
+    page.getByText(errorPattern),
+  ];
+
+  for (const locator of locators) {
+    const count = await locator.count().catch(() => 0);
+
+    for (let index = 0; index < Math.min(count, 8); index += 1) {
+      const candidate = locator.nth(index);
+
+      try {
+        if (!await candidate.isVisible()) continue;
+        const text = (await candidate.textContent())?.replace(/\s+/g, " ").trim();
+        if (text && errorPattern.test(text)) return text;
+      } catch {
+        // Try the next matching element.
+      }
+    }
+  }
+
+  return null;
+}
+
+async function waitForYouTubeLoginResult(page: Page, allowManualLoginFromStart = false, ignoreLoginErrors = false) {
+  await waitForLoginWithManualFallback({
+    page,
+    platform: "YouTube",
+    normalTimeoutMs: 120000,
+    pollMs: 500,
+    isLoggedIn: () => isYouTubeLoggedIn(page),
+    isManualVerificationVisible: (url) => isGoogleManualVerificationVisible(page, url),
+    isLoginFormVisible: () => googleLoginFormIsVisible(page),
+    getLoginError: () => getGoogleLoginError(page),
+    beforeCheck: () => dismissChromeSignInPrompt(page),
+    allowManualLoginFromStart,
+    ignoreLoginErrors,
+  });
+}
+
+async function fillGoogleLoginForm(page: Page, email: string, password: string) {
+  try {
+    const useAnother = page.locator('button:has-text("Use another account")');
+    if (await useAnother.count() > 0) await useAnother.click();
+  } catch {
+    // Ignore account chooser variations.
+  }
+
+  const emailField = await waitForVisible([
+    page.locator("#identifierId"),
+    page.locator('input[type="email"]'),
+  ], 60000);
+
+  if (emailField) {
+    console.log("Entering YouTube email...");
+    await emailField.fill(email);
+    await page.locator("#identifierNext").click({ timeout: 15000 });
+    await page.waitForTimeout(2000);
+  }
+
+  const passwordField = await waitForVisible([
+    page.locator('input[type="password"]'),
+  ], 60000);
+
+  if (!passwordField) {
+    console.log("YouTube needs manual verification before the password step.");
+    return;
+  }
+
+  console.log("Entering YouTube password...");
+  await passwordField.fill(password);
+  await page.locator("#passwordNext").click({ timeout: 15000 });
+}
+
+export async function loginToYouTube(page: Page, accountLogin?: AccountLogin) {
   const email = accountLogin?.identifier?.trim() || process.env.YOUTUBE_EMAIL?.trim();
   const password = accountLogin?.password?.trim() || process.env.YOUTUBE_PASSWORD?.trim();
-
-  if (!email || !password) throw new Error("Missing YouTube credentials in .env");
-
-  const videoPath = path.join(rootDir, "uploads", upload.fileName);
-  if (!fs.existsSync(videoPath)) throw new Error(`Video not found: ${videoPath}`);
+  const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
+  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
 
   console.log("Navigating to YouTube upload page...");
-  await page.goto("https://www.youtube.com/upload", { timeout: 60000 });
+  await page.goto(YOUTUBE_UPLOAD_URL, { timeout: 60000 });
+  await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(3000);
+  await dismissChromeSignInPrompt(page);
 
-  if (page.url().includes("accounts.google.com") || page.url().includes("signin")) {
-    console.log("Logging in automatically...");
+  if (await isYouTubeLoggedIn(page)) {
+    console.log("YouTube session already active.");
+  } else if (savedSessionOnly) {
+    throw new Error("YouTube saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
+  } else if (manualLoginOnly) {
+    console.log("Complete the full YouTube login manually in Chrome; bot will save the session after the account opens.");
+    await waitForYouTubeLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
+  } else if (email && password) {
+    console.log("YouTube session is not active. Trying automatic login...");
+    await fillGoogleLoginForm(page, email, password);
+    await waitForYouTubeLoginResult(page, true);
+  } else {
+    console.log("YouTube credentials are not configured. Complete login manually in Chrome...");
+    await waitForYouTubeLoginResult(page, true);
+  }
 
-    try {
-      const useAnother = page.locator('button:has-text("Use another account")');
-      if (await useAnother.count() > 0) await useAnother.click();
-    } catch {
-      // Ignore account chooser variations.
-    }
-
-    console.log("Entering email...");
-    await page.waitForSelector("#identifierId", { timeout: 60000 });
-    await page.fill("#identifierId", email);
-    await page.click("#identifierNext");
-    await page.waitForTimeout(2000);
-
-    console.log("Entering password...");
-    await page.waitForSelector('input[type="password"]', { timeout: 30000 });
-    await page.fill('input[type="password"]', password);
-    await page.click("#passwordNext");
-    await page.waitForTimeout(5000);
-
-    console.log("Login successful. Redirecting to upload...");
-    await page.goto("https://www.youtube.com/upload", { timeout: 60000 });
-    await page.waitForTimeout(3000);
+  if (!await isYouTubeLoggedIn(page)) {
+    await page.goto(YOUTUBE_UPLOAD_URL, { timeout: 60000 });
+    await waitForYouTubeLoginResult(page, true, manualLoginOnly && Boolean(accountLogin?.ignoreLoginErrors));
   }
 
   await dismissChromeSignInPrompt(page);
+  console.log("YouTube ready.");
+  return { success: true };
+}
+
+export async function postToYouTube(page: Page, upload: PlatformUpload, accountLogin?: AccountLogin) {
+  const videoPath = path.join(rootDir, "uploads", upload.fileName);
+  if (!fs.existsSync(videoPath)) throw new Error(`Video not found: ${videoPath}`);
+
+  await loginToYouTube(page, accountLogin);
 
   console.log("Uploading file...");
   const fileInput = page.locator('input[type="file"]');

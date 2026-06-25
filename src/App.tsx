@@ -54,6 +54,12 @@ type AuthSession = {
   role: UserRole;
 };
 
+type AutomationNotice = {
+  variant: 'success' | 'error';
+  title: string;
+  message: string;
+};
+
 const AUTH_SESSION_KEY = 'tinitiate-autobot-session';
 
 const loginCredentials: Record<UserRole, { username: string; password: string; label: string }> = {
@@ -213,6 +219,7 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
   const [folderPlatform, setFolderPlatform] = useState<Platform | null>(null);
   const [scheduleManagerOpen, setScheduleManagerOpen] = useState(false);
   const [editingUpload, setEditingUpload] = useState<PlatformUpload | null>(null);
+  const [automationNotice, setAutomationNotice] = useState<AutomationNotice | null>(null);
 
   const refresh = useCallback(async (showLoading = true) => {
     setError(null);
@@ -245,10 +252,18 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
     setIsRunning(true);
     try {
       await api.runAutomation();
-      alert('Automation started.');
+      setAutomationNotice({
+        variant: 'success',
+        title: 'Automation started',
+        message: 'Scheduled account sessions will be checked first. If verification is needed, the browser will open for you.',
+      });
       window.setTimeout(() => void refresh(false), 5000);
     } catch (e) {
-      alert('Error: ' + (e instanceof Error ? e.message : 'Unknown'));
+      setAutomationNotice({
+        variant: 'error',
+        title: 'Automation could not start',
+        message: e instanceof Error ? e.message : 'Unknown error',
+      });
     } finally {
       setIsRunning(false);
     }
@@ -284,9 +299,43 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
           onSuccess={() => void refresh()}
         />
       )}
+      {automationNotice && (
+        <AutomationNoticeModal
+          notice={automationNotice}
+          onClose={() => setAutomationNotice(null)}
+        />
+      )}
     </>
   );
 }
+
+function AutomationNoticeModal({ notice, onClose }: { notice: AutomationNotice; onClose: () => void }) {
+  const isSuccess = notice.variant === 'success';
+
+  return (
+    <div className='modal-overlay automation-notice-overlay' onClick={onClose}>
+      <div
+        className={`automation-notice-panel ${notice.variant}`}
+        role='dialog'
+        aria-modal='true'
+        aria-labelledby='automation-notice-title'
+        onClick={event => event.stopPropagation()}
+      >
+        <div className='automation-notice-icon'>
+          {isSuccess ? <CircleCheckBig size={28} /> : <CircleAlert size={28} />}
+        </div>
+        <div className='automation-notice-copy'>
+          <h2 id='automation-notice-title'>{notice.title}</h2>
+          <p>{notice.message}</p>
+        </div>
+        <button type='button' className='automation-notice-action' onClick={onClose}>
+          OK
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function toLocalDayKey(value: string | Date) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '';

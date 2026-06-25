@@ -1,18 +1,33 @@
 import { chromium, type BrowserContext, type Page } from "playwright";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PlatformUpload } from "../../shared/schema.js";
-import { automationInput, getPublishingAccount, listUploads, updateUploadStatus, type AutomationInputMode, type PublishingAccount } from "../storage.js";
-import { postToFacebook } from "./publishers/facebook.js";
-import { postToInstagram } from "./publishers/instagram.js";
-import { postToLinkedIn } from "./publishers/linkedin.js";
+import {
+  automationInput,
+  createAutomationRun,
+  createAutomationRunPost,
+  finishAutomationRun,
+  finishAutomationRunPost,
+  getPublishingAccount,
+  listUploads,
+  updateUploadStatus,
+  type AutomationInputMode,
+  type AutomationRunTrigger,
+  type PublishingAccount
+} from "../storage.js";
+import { loginToFacebook, postToFacebook } from "./publishers/facebook.js";
+import { loginToInstagram, postToInstagram } from "./publishers/instagram.js";
+import { loginToLinkedIn, postToLinkedIn } from "./publishers/linkedin.js";
 import type { AccountLogin } from "./publishers/manual-login.js";
-import { postToYouTube } from "./publishers/youtube.js";
-import { postToX } from "./publishers/x.js";
+import { loginToYouTube, postToYouTube } from "./publishers/youtube.js";
+import { loginToX, postToX } from "./publishers/x.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const accountProfilesDir = path.join(rootDir, "browser-data", "accounts");
+const X_LOGIN_URL = "https://x.com/i/flow/login";
 
 const disabledChromeFeatures = [
   "IsolateOrigins",
@@ -44,6 +59,72 @@ function accountProfilePath(account: PublishingAccount) {
   return path.join(accountProfilesDir, account.platform, account.id.replace(/[^a-z0-9-_]/gi, "-"));
 }
 
+function accountSessionStatePath(account: PublishingAccount) {
+  return path.join(accountProfilePath(account), "automation-session-state.json");
+}
+
+function chromeExecutablePath() {
+  const configured = process.env.CHROME_PATH?.trim() || process.env.GOOGLE_CHROME_PATH?.trim();
+  const candidates = [
+    configured,
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Google", "Chrome", "Application", "chrome.exe") : undefined,
+    process.env["ProgramFiles(x86)"] ? path.join(process.env["ProgramFiles(x86)"], "Google", "Chrome", "Application", "chrome.exe") : undefined,
+    process.env.LocalAppData ? path.join(process.env.LocalAppData, "Google", "Chrome", "Application", "chrome.exe") : undefined,
+    process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : undefined,
+    process.platform === "linux" ? "google-chrome" : undefined,
+    process.platform === "win32" ? "chrome.exe" : "google-chrome",
+  ].filter(Boolean) as string[];
+
+  return candidates.find(candidate => path.isAbsolute(candidate) && fs.existsSync(candidate)) ?? candidates[candidates.length - 1];
+}
+
+function getFreePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close(() => port ? resolve(port) : reject(new Error("Could not allocate a Chrome debugging port.")));
+    });
+  });
+}
+
+function waitForProcessExit(processHandle: ChildProcess, timeoutMs: number) {
+  if (processHandle.exitCode !== null || processHandle.killed) return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, timeoutMs);
+    processHandle.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
+async function waitForChromeDebugEndpoint(port: number, processHandle: ChildProcess, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  const endpoint = `http://127.0.0.1:${port}`;
+
+  while (Date.now() < deadline) {
+    if (processHandle.exitCode !== null) {
+      throw new Error(`Chrome closed before the manual login window was ready. Exit code: ${processHandle.exitCode}`);
+    }
+
+    try {
+      const response = await fetch(`${endpoint}/json/version`);
+      if (response.ok) return endpoint;
+    } catch {
+      // Chrome is still starting.
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  throw new Error("Chrome did not expose its local debugging endpoint in time.");
+}
+
 function prepareChromeProfile(profileDir: string) {
   const preferencesPath = path.join(profileDir, "Default", "Preferences");
   const preferences = readJsonFile(preferencesPath);
@@ -60,7 +141,7 @@ async function launchAccountBrowser(account: PublishingAccount): Promise<Browser
   prepareChromeProfile(profileDir);
   const slowMoMs = Number(process.env.AUTOMATION_SLOW_MO_MS ?? 120);
   const commonArgs = ["--no-first-run", "--no-default-browser-check", "--disable-notifications", "--deny-permission-prompts"];
-  return chromium.launchPersistentContext(profileDir, {
+  const context = await chromium.launchPersistentContext(profileDir, {
     headless: false,
     channel: "chrome",
     slowMo: slowMoMs,
@@ -70,18 +151,115 @@ async function launchAccountBrowser(account: PublishingAccount): Promise<Browser
       : [...commonArgs, "--disable-blink-features=AutomationControlled", "--disable-site-isolation-trials", "--disable-sync", "--disable-signin-promo", `--disable-features=${disabledChromeFeatures}`],
     userAgent: account.platform === "facebook" ? undefined : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   });
+  await restoreAccountSessionState(account, context);
+  return context;
 }
 
-function accountLogin(account: PublishingAccount): AccountLogin {
+async function saveAccountSessionState(account: PublishingAccount, context: BrowserContext) {
+  try {
+    const statePath = accountSessionStatePath(account);
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    await context.storageState({ path: statePath });
+    console.log(`Saved browser session state for ${account.platform} account ${account.handle}.`);
+  } catch (error) {
+    console.warn(
+      `Could not save browser session state for ${account.platform} account ${account.handle}:`,
+      errorMessage(error),
+    );
+  }
+}
+
+async function restoreAccountSessionState(account: PublishingAccount, context: BrowserContext) {
+  const statePath = accountSessionStatePath(account);
+  if (!fs.existsSync(statePath)) return;
+
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as { cookies?: Parameters<BrowserContext["addCookies"]>[0] };
+    if (Array.isArray(state.cookies) && state.cookies.length > 0) {
+      await context.addCookies(state.cookies);
+    }
+  } catch (error) {
+    console.warn(
+      `Could not restore saved session state for ${account.platform} account ${account.handle}:`,
+      errorMessage(error),
+    );
+  }
+}
+
+async function launchNormalChromeForManualXLogin(account: PublishingAccount) {
+  const profileDir = accountProfilePath(account);
+  fs.mkdirSync(profileDir, { recursive: true });
+  prepareChromeProfile(profileDir);
+
+  const port = await getFreePort();
+  const chromePath = chromeExecutablePath();
+  const chromeArgs = [
+    `--user-data-dir=${profileDir}`,
+    "--profile-directory=Default",
+    `--remote-debugging-port=${port}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-notifications",
+    "--new-window",
+    X_LOGIN_URL,
+  ];
+
+  console.log(`Opening normal Chrome for manual X login for ${account.handle}.`);
+  const chromeProcess = spawn(chromePath, chromeArgs, {
+    stdio: "ignore",
+    windowsHide: false,
+  });
+
+  let spawnError: Error | null = null;
+  chromeProcess.once("error", error => { spawnError = error; });
+
+  await new Promise(resolve => setTimeout(resolve, 100));
+  if (spawnError) throw spawnError;
+
+  return { chromeProcess, debugEndpoint: await waitForChromeDebugEndpoint(port, chromeProcess) };
+}
+
+async function prepareXSessionInNormalChrome(account: PublishingAccount) {
+  const { chromeProcess, debugEndpoint } = await launchNormalChromeForManualXLogin(account);
+  let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
+
+  try {
+    browser = await chromium.connectOverCDP(debugEndpoint);
+    const context = browser.contexts()[0];
+    const page = context.pages().find(item => item.url().includes("x.com")) ?? context.pages()[0] ?? await context.newPage();
+    await page.bringToFront().catch(() => undefined);
+    await loginToX(page, undefined, false, accountLogin(account, {
+      forceManualLogin: true,
+      ignoreLoginErrors: true,
+    }));
+    await saveAccountSessionState(account, context);
+    console.log(`Normal Chrome manual X session saved for ${account.handle}. Closing Chrome.`);
+  } finally {
+    await browser?.close().catch(() => undefined);
+    await waitForProcessExit(chromeProcess, 15000);
+    if (chromeProcess.exitCode === null && !chromeProcess.killed) chromeProcess.kill();
+  }
+}
+
+type AccountLoginOptions = {
+  useSavedSessionOnly?: boolean;
+  forceManualLogin?: boolean;
+  ignoreLoginErrors?: boolean;
+};
+
+function accountLogin(account: PublishingAccount, options: AccountLoginOptions = {}): AccountLogin {
   return {
     identifier: account.loginIdentifier === "Existing browser session" ? undefined : account.loginIdentifier,
     password: account.password,
-    confirmation: account.loginConfirmation
+    confirmation: account.loginConfirmation,
+    useSavedSessionOnly: options.useSavedSessionOnly,
+    forceManualLogin: options.forceManualLogin,
+    ignoreLoginErrors: options.ignoreLoginErrors
   };
 }
 
-async function publishOne(page: Page, upload: PlatformUpload, account: PublishingAccount) {
-  const login = accountLogin(account);
+async function publishOne(page: Page, upload: PlatformUpload, account: PublishingAccount, options: AccountLoginOptions = {}) {
+  const login = accountLogin(account, options);
   switch (upload.platform) {
     case "youtube": return postToYouTube(page, upload, login);
     case "linkedin": return postToLinkedIn(page, upload, login);
@@ -91,39 +269,235 @@ async function publishOne(page: Page, upload: PlatformUpload, account: Publishin
   }
 }
 
-function getFailureHoldMs() {
-  const configured = Number(process.env.AUTOMATION_FAILURE_HOLD_MS ?? 0);
-  return Number.isFinite(configured) ? Math.max(0, configured) : 0;
+async function loginOnly(page: Page, account: PublishingAccount, options: AccountLoginOptions = {}) {
+  const login = accountLogin(account, options);
+  switch (account.platform) {
+    case "youtube": return loginToYouTube(page, login);
+    case "linkedin": return loginToLinkedIn(page, undefined, login);
+    case "instagram": return loginToInstagram(page, undefined, false, login);
+    case "facebook": return loginToFacebook(page, undefined, false, login);
+    case "x": return loginToX(page, undefined, false, login);
+  }
 }
 
-async function runAccountQueue(account: PublishingAccount, uploads: PlatformUpload[]) {
-  console.log(`Publishing ${uploads.length} post(s) through ${account.platform} account ${account.handle} (${account.id}).`);
+async function verifySavedSession(account: PublishingAccount) {
+  console.log(`Verifying saved session for ${account.platform} account ${account.handle}.`);
   const browser = await launchAccountBrowser(account);
-  let hadFailure = false;
+
   try {
     const page = browser.pages()[0] ?? await browser.newPage();
-    for (const upload of uploads) {
-      await updateUploadStatus(upload.id, "processing");
-      try {
-        await publishOne(page, upload, account);
-        await updateUploadStatus(upload.id, "posted");
-        console.log(`Posted ${upload.id} through ${account.handle}.`);
-      } catch (error) {
-        hadFailure = true;
-        await updateUploadStatus(upload.id, "failed");
-        console.error(`Failed ${upload.id} through ${account.handle}:`, error instanceof Error ? error.message : error);
-      }
-    }
-    const holdMs = getFailureHoldMs();
-    if (hadFailure && holdMs > 0) await new Promise(resolve => setTimeout(resolve, holdMs));
+    await loginOnly(page, account, { useSavedSessionOnly: true });
+    await saveAccountSessionState(account, browser);
+    console.log(`Verified saved session for ${account.platform} account ${account.handle}.`);
   } finally {
     await browser.close();
   }
 }
 
+function xAutomaticLoginConfigured(account: PublishingAccount) {
+  if (process.env.X_AUTO_LOGIN === "false") return false;
+
+  const envIdentifier = (
+    process.env.X_EMAIL ??
+    process.env.TWITTER_EMAIL ??
+    process.env.X_USERNAME ??
+    process.env.TWITTER_USERNAME ??
+    process.env.X_PHONE ??
+    process.env.TWITTER_PHONE
+  )?.trim();
+  const accountIdentifier = account.loginIdentifier === "Existing browser session" ? undefined : account.loginIdentifier?.trim();
+  const password = account.password?.trim() || (process.env.X_PASSWORD ?? process.env.TWITTER_PASSWORD)?.trim();
+
+  return Boolean((accountIdentifier || envIdentifier) && password);
+}
+
+async function prepareXAccountSession(account: PublishingAccount) {
+  console.log(`Checking saved X session for ${account.handle} (${account.id}).`);
+
+  let browser = await launchAccountBrowser(account);
+  try {
+    const page = browser.pages()[0] ?? await browser.newPage();
+    await loginOnly(page, account, { useSavedSessionOnly: true });
+    await saveAccountSessionState(account, browser);
+    console.log(`X session ready for ${account.handle}.`);
+    return;
+  } catch {
+    console.log(`Saved X session is not active for ${account.handle}.`);
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+
+  if (xAutomaticLoginConfigured(account)) {
+    browser = await launchAccountBrowser(account);
+    try {
+      const page = browser.pages()[0] ?? await browser.newPage();
+      await loginOnly(page, account);
+      await saveAccountSessionState(account, browser);
+      console.log(`X automatic login saved the session for ${account.handle}.`);
+      await browser.close().catch(() => undefined);
+      await verifySavedSession(account);
+      return;
+    } catch (error) {
+      console.warn(
+        `Automatic X login failed for ${account.handle}: ${errorMessage(error)}. Opening normal Chrome for manual login.`,
+      );
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+  } else {
+    console.log(`X automatic login is not configured for ${account.handle}. Opening normal Chrome for manual login.`);
+  }
+
+  await prepareXSessionInNormalChrome(account);
+  await verifySavedSession(account);
+}
+
+function getFailureHoldMs() {
+  const configured = Number(process.env.AUTOMATION_FAILURE_HOLD_MS ?? 0);
+  return Number.isFinite(configured) ? Math.max(0, configured) : 0;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function runAccountQueue(
+  automationRunId: string,
+  trigger: AutomationRunTrigger,
+  account: PublishingAccount,
+  uploads: PlatformUpload[],
+  options: AccountLoginOptions = {},
+) {
+  console.log(`Publishing ${uploads.length} post(s) through ${account.platform} account ${account.handle} (${account.id}).`);
+  const runPostIds = new Map<string, string>();
+  for (const upload of uploads) {
+    runPostIds.set(upload.id, await createAutomationRunPost(automationRunId, upload));
+  }
+
+  let browser: BrowserContext | null = null;
+  let hadFailure = false;
+
+  async function failUnfinishedPosts(message: string) {
+    const currentUploads = await listUploads(account.platform, account.id);
+    const currentById = new Map(currentUploads.map(upload => [upload.id, upload]));
+
+    for (const upload of uploads) {
+      const currentUpload = currentById.get(upload.id) ?? upload;
+      if (currentUpload.status === "posted") continue;
+
+      await updateUploadStatus(upload.id, "failed", `Automation ${trigger} run ${automationRunId} failed: ${message}`);
+      const runPostId = runPostIds.get(upload.id);
+      if (runPostId) await finishAutomationRunPost(runPostId, "failed", message);
+    }
+  }
+
+  try {
+    browser = await launchAccountBrowser(account);
+    const page = browser.pages()[0] ?? await browser.newPage();
+
+    for (const upload of uploads) {
+      const runPostId = runPostIds.get(upload.id);
+      await updateUploadStatus(upload.id, "processing", `Automation ${trigger} run ${automationRunId} started publishing`);
+
+      try {
+        await publishOne(page, upload, account, options);
+      } catch (error) {
+        hadFailure = true;
+        const message = errorMessage(error);
+        await updateUploadStatus(upload.id, "failed", `Automation ${trigger} run ${automationRunId} failed: ${message}`);
+        if (runPostId) await finishAutomationRunPost(runPostId, "failed", message);
+        console.error(`Failed ${upload.id} through ${account.handle}:`, message);
+        continue;
+      }
+
+      await updateUploadStatus(upload.id, "posted", `Automation ${trigger} run ${automationRunId} posted successfully`);
+      if (runPostId) await finishAutomationRunPost(runPostId, "posted");
+      console.log(`Posted ${upload.id} through ${account.handle}.`);
+    }
+
+    const holdMs = getFailureHoldMs();
+    if (hadFailure && holdMs > 0) await new Promise(resolve => setTimeout(resolve, holdMs));
+    return hadFailure;
+  } catch (error) {
+    hadFailure = true;
+    await failUnfinishedPosts(errorMessage(error));
+    throw error;
+  } finally {
+    if (browser) {
+      await saveAccountSessionState(account, browser);
+      await browser.close();
+    }
+  }
+}
+
+function needsSessionPreparation(upload: PlatformUpload) {
+  return upload.status === "queued" && Boolean(upload.scheduledAt || upload.scheduleId);
+}
+
+async function prepareAccountSession(account: PublishingAccount) {
+  if (account.platform === "x") {
+    await prepareXAccountSession(account);
+    return;
+  }
+
+  console.log(`Checking saved session for ${account.platform} account ${account.handle} (${account.id}).`);
+  let browser = await launchAccountBrowser(account);
+  try {
+    const page = browser.pages()[0] ?? await browser.newPage();
+    await loginOnly(page, account);
+    await saveAccountSessionState(account, browser);
+    console.log(`Session ready for ${account.platform} account ${account.handle}.`);
+  } catch (error) {
+    const message = errorMessage(error);
+    console.warn(
+      `Automatic session preparation failed for ${account.platform} account ${account.handle}: ${message}. Reopening a fresh browser for manual login.`,
+    );
+    await browser.close().catch(() => undefined);
+
+    browser = await launchAccountBrowser(account);
+    const page = browser.pages()[0] ?? await browser.newPage();
+    await loginOnly(page, account, { forceManualLogin: true, ignoreLoginErrors: true });
+    await saveAccountSessionState(account, browser);
+    console.log(`Manual session saved for ${account.platform} account ${account.handle}.`);
+  } finally {
+    await browser.close();
+  }
+
+  await verifySavedSession(account);
+}
+
+async function prepareScheduledAccountSessions() {
+  const uploads = await listUploads();
+  const scheduledAccountIds = [...new Set(uploads.filter(needsSessionPreparation).map(upload => upload.accountId))];
+  if (scheduledAccountIds.length === 0) {
+    console.log("No scheduled accounts need session preparation.");
+    return;
+  }
+
+  console.log(`Preparing browser sessions for ${scheduledAccountIds.length} scheduled account(s)...`);
+  const accounts = await Promise.all(scheduledAccountIds.map(accountId => getPublishingAccount(accountId)));
+
+  await Promise.all(accounts.map(async (account, index) => {
+    const accountId = scheduledAccountIds[index];
+    if (!account || !account.enabled) {
+      console.warn(`Skipping session preparation for missing or disabled account ${accountId}.`);
+      return;
+    }
+
+    try {
+      await prepareAccountSession(account);
+    } catch (error) {
+      console.error(
+        `Session preparation failed for ${account.platform} account ${account.handle}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }));
+}
+
 type RunAutomationOptions = {
   mode?: AutomationInputMode;
-  trigger?: "manual" | "scheduler";
+  trigger?: AutomationRunTrigger;
 };
 
 let activeAutomationRun: Promise<void> | null = null;
@@ -134,6 +508,7 @@ export function isAutomationRunning() {
 
 async function runAutomationOnce({ mode = "ready", trigger = "manual" }: RunAutomationOptions) {
   console.log(`Starting publisher automation (${trigger})...`);
+  if (trigger === "manual") await prepareScheduledAccountSessions();
   const { channels } = await automationInput(undefined, mode);
   const uploads = Object.values(channels).flat();
   if (uploads.length === 0) {
@@ -141,24 +516,47 @@ async function runAutomationOnce({ mode = "ready", trigger = "manual" }: RunAuto
     return;
   }
 
+  const automationRunId = await createAutomationRun(trigger);
+  let hadRunFailure = false;
+  let runErrorMessage: string | undefined;
   const queues = new Map<string, PlatformUpload[]>();
   for (const upload of uploads) queues.set(upload.accountId, [...(queues.get(upload.accountId) ?? []), upload]);
 
-  for (const [accountId, accountUploads] of queues) {
-    const account = await getPublishingAccount(accountId);
-    if (!account || !account.enabled) {
-      for (const upload of accountUploads) await updateUploadStatus(upload.id, "failed");
-      console.error(`Publishing account ${accountId} is missing or disabled.`);
-      continue;
-    }
-    try {
-      await runAccountQueue(account, accountUploads);
-    } catch (error) {
-      const currentUploads = await listUploads(account.platform, account.id);
-      const queuedIds = new Set(accountUploads.map(upload => upload.id));
-      for (const upload of currentUploads) if (queuedIds.has(upload.id) && upload.status !== "posted") await updateUploadStatus(upload.id, "failed");
-      console.error(`Could not run account ${account.handle}:`, error);
-    }
+  try {
+    await Promise.all([...queues.entries()].map(async ([accountId, accountUploads]) => {
+      const account = await getPublishingAccount(accountId);
+      if (!account || !account.enabled) {
+        const message = `Publishing account ${accountId} is missing or disabled.`;
+        hadRunFailure = true;
+        runErrorMessage ??= message;
+        for (const upload of accountUploads) {
+          await updateUploadStatus(upload.id, "failed", `Automation ${trigger} run ${automationRunId} failed: ${message}`);
+        }
+        console.error(message);
+        return;
+      }
+
+      try {
+        const accountHadFailure = await runAccountQueue(automationRunId, trigger, account, accountUploads, {
+          useSavedSessionOnly: trigger === "scheduler",
+        });
+        if (accountHadFailure) {
+          hadRunFailure = true;
+          runErrorMessage ??= "One or more posts failed.";
+        }
+      } catch (error) {
+        const message = errorMessage(error);
+        hadRunFailure = true;
+        runErrorMessage ??= message;
+        console.error(`Could not run account ${account.handle}:`, message);
+      }
+    }));
+  } finally {
+    await finishAutomationRun(
+      automationRunId,
+      hadRunFailure ? "failed" : "completed",
+      hadRunFailure ? runErrorMessage : undefined,
+    );
   }
 }
 
