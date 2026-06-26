@@ -2403,6 +2403,24 @@ button, input, textarea, select { font-family: inherit; }
 .schedule-status.active { background: #E7F7EF; color: #14805A; }
 .schedule-account-count { display: inline-flex; align-items: center; justify-content: center; gap: 4px; color: #5D756C; font-size: 11px; font-weight: 800; }
 .schedule-row .btn-outline, .schedule-row .btn-danger { min-height: 34px; border-radius: 7px; padding: 7px 10px; }
+.storage-access-list-view { margin-top: 22px; padding-top: 18px; border-top: 1px solid #DFE7E3; }
+.storage-access-list { display: grid; gap: 9px; }
+.storage-access-row { min-height: 68px; display: grid; grid-template-columns: 38px minmax(150px, 1fr) auto minmax(180px, 0.8fr) auto 42px; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid #DCE5E1; border-radius: 9px; background: #FFFFFF; }
+.storage-access-row > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
+.storage-access-row strong, .storage-access-row small, .storage-access-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-access-row strong { color: #203A31; font-size: 12px; }
+.storage-access-row small, .storage-access-path { color: #6F8079; font-size: 10px; }
+.storage-access-row .btn-outline, .storage-access-row .btn-danger { min-height: 34px; border-radius: 7px; padding: 7px 10px; }
+.storage-access-path { min-width: 0; padding: 6px 8px; border-radius: 6px; background: #F6F9F7; font-family: Consolas, monospace; }
+.user-manager-modal textarea { width: 100%; padding: 11px 12px; border: 1px solid #D5DFDA; border-radius: 7px; color: #203B31; font: inherit; font-size: 12px; resize: vertical; outline: none; }
+.user-role-list, .activity-log-list { display: grid; gap: 9px; }
+.user-role-row, .activity-log-row { min-height: 66px; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid #DCE5E1; border-radius: 9px; background: #FFFFFF; }
+.user-role-row > span:nth-child(2), .activity-log-row > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
+.user-role-row strong, .activity-log-row strong { overflow: hidden; color: #203A31; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.user-role-row small, .activity-log-row small { overflow: hidden; color: #6F8079; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-log-row { grid-template-columns: 12px minmax(0, 1fr) auto; }
+.activity-log-row time { color: #71827B; font-size: 10px; white-space: nowrap; }
+.activity-dot { width: 8px; height: 8px; border-radius: 50%; background: #2B927A; box-shadow: 0 0 0 4px #E2F3EC; }
 
 @media (max-width: 720px) {
   .publishing-account-row { grid-template-columns: 38px minmax(0, 1fr) 50px 18px; }
@@ -2413,4 +2431,8 @@ button, input, textarea, select { font-family: inherit; }
   .account-status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .schedule-row { grid-template-columns: 42px minmax(0, 1fr) auto; }
   .schedule-row .btn-outline, .schedule-row .btn-danger, .schedule-account-count { display: none; }
+  .storage-access-row { grid-template-columns: 34px minmax(0, 1fr) auto; }
+  .storage-access-path, .storage-access-row .btn-outline { display: none; }
+  .user-role-row, .activity-log-row { grid-template-columns: 34px minmax(0, 1fr); }
+  .user-role-row .btn-outline, .user-role-row .btn-danger, .activity-log-row time { display: none; }
 }

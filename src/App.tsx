@@ -1,6 +1,6 @@
 import {
   Loader2, RefreshCw, X,
-  CalendarClock, FileText, FolderSync, Pencil, Trash2, Unplug,
+  CalendarClock, FileText, FolderSync, Pencil, Trash2,
   ArrowRight, BriefcaseBusiness, KeyRound, LockKeyhole, LogOut, ShieldCheck, UsersRound,
   CalendarDays, ChevronLeft, ChevronRight, CircleAlert, CircleCheckBig,
   CircleDashed, FolderOpen, LayoutDashboard, ListFilter, Send, TimerReset,
@@ -8,9 +8,9 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FaFacebook, FaInstagram, FaLinkedin, FaXTwitter, FaYoutube } from "react-icons/fa6";
-import type { FolderConnection, Platform, PlatformAccount, PlatformUpload, PublishingSchedule, ScheduleFrequency, ScheduleStatus } from "../shared/schema";
-import { platformLabels, platforms, scheduleFrequencies, scheduleFrequencyLabels } from "../shared/schema";
-import { api } from "./lib/api";
+import type { ActivityLog, Platform, PlatformAccount, PlatformUpload, PublishingSchedule, ScheduleFrequency, ScheduleStatus, StorageConnection, StorageSourceType, UserProfile, UserRole } from "../shared/schema";
+import { platformLabels, platforms, scheduleFrequencies, scheduleFrequencyLabels, storageSourceTypeLabels, userRoleLabels, userRoles } from "../shared/schema";
+import { api, setAuthToken, type AuthResponse } from "./lib/api";
 
 // --- PLATFORM BRAND ICONS ---
 const CustomIcon = ({ platform, size = 28 }: { platform: Platform; size?: number }) => {
@@ -48,10 +48,19 @@ function toLocalDateTimeInputValue(date: Date) {
   return localTime.toISOString().slice(0, 16);
 }
 
-type UserRole = 'manager' | 'customer';
-
 type AuthSession = {
-  role: UserRole;
+  token: string;
+  user: UserProfile;
+};
+
+type RolePermissions = {
+  canManageUsers: boolean;
+  canViewActivity: boolean;
+  canManageAccounts: boolean;
+  canManageStorageAccess: boolean;
+  canEditContent: boolean;
+  canSchedulePosts: boolean;
+  canRunAutomation: boolean;
 };
 
 type AutomationNotice = {
@@ -62,25 +71,40 @@ type AutomationNotice = {
 
 const AUTH_SESSION_KEY = 'tinitiate-autobot-session';
 
-const loginCredentials: Record<UserRole, { username: string; password: string; label: string }> = {
-  manager: {
-    username: 'operations.manager',
-    password: 'Tinitiate@2026',
-    label: 'Operations Manager',
-  },
-  customer: {
-    username: 'customer',
-    password: 'Customer@2026',
-    label: 'Customer',
-  },
+const loginRoleOptions: Array<{ role: UserRole; username: string; description: string }> = [
+  { role: 'operations_manager', username: 'operations.manager', description: 'Full workspace, users, audit, and automation access' },
+  { role: 'post_uploader', username: 'content.uploader', description: 'Review imported posts and edit captions or titles' },
+  { role: 'scheduler', username: 'post.scheduler', description: 'Create schedules and assign publish times' },
+  { role: 'viewer', username: 'workspace.viewer', description: 'Read-only workspace overview' },
+];
+
+const roleInitials: Record<UserRole, string> = {
+  operations_manager: 'OM',
+  post_uploader: 'UP',
+  scheduler: 'SC',
+  viewer: 'VW',
 };
+
+function permissionsForRole(role: UserRole): RolePermissions {
+  return {
+    canManageUsers: role === 'operations_manager',
+    canViewActivity: role === 'operations_manager',
+    canManageAccounts: role === 'operations_manager',
+    canManageStorageAccess: role === 'operations_manager' || role === 'post_uploader',
+    canEditContent: role === 'operations_manager' || role === 'post_uploader',
+    canSchedulePosts: role === 'operations_manager' || role === 'scheduler',
+    canRunAutomation: role === 'operations_manager',
+  };
+}
 
 function readSavedSession(): AuthSession | null {
   try {
     const saved = window.sessionStorage.getItem(AUTH_SESSION_KEY);
     if (!saved) return null;
     const session = JSON.parse(saved) as AuthSession;
-    return session.role === 'manager' || session.role === 'customer' ? session : null;
+    if (!session.token || !session.user || !userRoles.includes(session.user.role)) return null;
+    setAuthToken(session.token);
+    return session;
   } catch {
     return null;
   }
@@ -89,49 +113,53 @@ function readSavedSession(): AuthSession | null {
 export default function App() {
   const [session, setSession] = useState<AuthSession | null>(readSavedSession);
 
-  const signIn = (role: UserRole) => {
-    const nextSession = { role };
+  const signIn = (response: AuthResponse) => {
+    const nextSession = { token: response.token, user: response.user };
+    setAuthToken(response.token);
     window.sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(nextSession));
     setSession(nextSession);
   };
 
   const signOut = () => {
+    setAuthToken(null);
     window.sessionStorage.removeItem(AUTH_SESSION_KEY);
     setSession(null);
   };
 
   return session
-    ? <Dashboard role={session.role} onSignOut={signOut} />
+    ? <Dashboard session={session} onSignOut={signOut} />
     : <LandingPage onSignIn={signIn} />;
 }
 
-function LandingPage({ onSignIn }: { onSignIn: (role: UserRole) => void }) {
+function LandingPage({ onSignIn }: { onSignIn: (response: AuthResponse) => void }) {
   const [selectedRole, setSelectedRole] = useState<UserRole | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const chooseRole = (role: UserRole) => {
-    const credentials = loginCredentials[role];
+    const credentials = loginRoleOptions.find(option => option.role === role);
     setSelectedRole(role);
-    setUsername(credentials.username);
-    setPassword(credentials.password);
+    setUsername(credentials?.username ?? '');
     setError('');
   };
 
-  const submit = () => {
-    if (!selectedRole) {
-      setError('Choose a login type first.');
+  const submit = async () => {
+    setError('');
+    if (!username.trim() || !password) {
+      setError('Enter your username and password.');
       return;
     }
 
-    const credentials = loginCredentials[selectedRole];
-    if (username !== credentials.username || password !== credentials.password) {
-      setError('The username or password does not match this login type.');
-      return;
+    setLoading(true);
+    try {
+      onSignIn(await api.login({ username: username.trim(), password }));
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Sign in failed.');
+    } finally {
+      setLoading(false);
     }
-
-    onSignIn(selectedRole);
   };
 
   return (
@@ -155,30 +183,23 @@ function LandingPage({ onSignIn }: { onSignIn: (role: UserRole) => void }) {
           <div className='auth-heading'>
             <p className='auth-kicker'>Secure workspace</p>
             <h2 id='access-title'>Sign in</h2>
-            <p>Select your workspace access, then continue with the temporary credentials.</p>
+            <p>Use your assigned workspace credentials. Your role controls which sections are available after sign in.</p>
           </div>
 
           <div className='role-options' aria-label='Choose login type'>
-            <button
-              type='button'
-              className={`role-option ${selectedRole === 'manager' ? 'selected' : ''}`}
-              aria-pressed={selectedRole === 'manager'}
-              onClick={() => chooseRole('manager')}
-            >
-              <BriefcaseBusiness size={21} />
-              <span><strong>Operations Manager</strong><small>Manage content and publishing</small></span>
-              <ArrowRight size={18} />
-            </button>
-            <button
-              type='button'
-              className={`role-option ${selectedRole === 'customer' ? 'selected' : ''}`}
-              aria-pressed={selectedRole === 'customer'}
-              onClick={() => chooseRole('customer')}
-            >
-              <UsersRound size={21} />
-              <span><strong>Customer</strong><small>Access your publishing workspace</small></span>
-              <ArrowRight size={18} />
-            </button>
+            {loginRoleOptions.map(option => (
+              <button
+                type='button'
+                key={option.role}
+                className={`role-option ${selectedRole === option.role ? 'selected' : ''}`}
+                aria-pressed={selectedRole === option.role}
+                onClick={() => chooseRole(option.role)}
+              >
+                {option.role === 'operations_manager' ? <BriefcaseBusiness size={21} /> : <UsersRound size={21} />}
+                <span><strong>{userRoleLabels[option.role]}</strong><small>{option.description}</small></span>
+                <ArrowRight size={18} />
+              </button>
+            ))}
           </div>
 
           <form className='auth-form' onSubmit={event => { event.preventDefault(); submit(); }}>
@@ -194,12 +215,13 @@ function LandingPage({ onSignIn }: { onSignIn: (role: UserRole) => void }) {
             {selectedRole && (
               <div className='temporary-access'>
                 <ShieldCheck size={17} />
-                <span>Temporary access: <code>{loginCredentials[selectedRole].username}</code> / <code>{loginCredentials[selectedRole].password}</code></span>
+                <span>Role selected: <code>{userRoleLabels[selectedRole]}</code></span>
               </div>
             )}
             {error && <p className='auth-error' role='alert'>{error}</p>}
-            <button type='submit' className='auth-submit' disabled={!selectedRole}>
-              Sign in as {selectedRole ? loginCredentials[selectedRole].label : '...'}<ArrowRight size={18} />
+            <button type='submit' className='auth-submit' disabled={loading}>
+              {loading ? <Loader2 className='spin' size={18} /> : <ArrowRight size={18} />}
+              Sign in
             </button>
           </form>
         </div>
@@ -208,16 +230,22 @@ function LandingPage({ onSignIn }: { onSignIn: (role: UserRole) => void }) {
   );
 }
 
-function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void }) {
+function Dashboard({ session, onSignOut }: { session: AuthSession; onSignOut: () => void }) {
+  const user = session.user;
+  const permissions = useMemo(() => permissionsForRole(user.role), [user.role]);
   const [uploads, setUploads] = useState<PlatformUpload[]>([]);
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [schedules, setSchedules] = useState<PublishingSchedule[]>([]);
-  const [folderConnections, setFolderConnections] = useState<FolderConnection[]>([]);
+  const [storageConnections, setStorageConnections] = useState<StorageConnection[]>([]);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [folderPlatform, setFolderPlatform] = useState<Platform | null>(null);
   const [scheduleManagerOpen, setScheduleManagerOpen] = useState(false);
+  const [storageAccessOpen, setStorageAccessOpen] = useState(false);
+  const [userManagerOpen, setUserManagerOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
   const [editingUpload, setEditingUpload] = useState<PlatformUpload | null>(null);
   const [automationNotice, setAutomationNotice] = useState<AutomationNotice | null>(null);
 
@@ -225,22 +253,32 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
     setError(null);
     if (showLoading) setLoading(true);
     try {
-      const [latestUploads, latestAccounts, latestSchedules, latestConnections] = await Promise.all([
+      const baseRequests = [
         api.uploads(),
         api.accounts(),
         api.schedules(),
-        api.folderConnections(),
-      ]);
+      ] as const;
+      const [latestUploads, latestAccounts, latestSchedules] = await Promise.all(baseRequests);
       setUploads(latestUploads);
       setAccounts(latestAccounts);
       setSchedules(latestSchedules);
-      setFolderConnections(latestConnections);
+      if (permissions.canManageStorageAccess) {
+        setStorageConnections(await api.storageConnections());
+      }
+      if (permissions.canManageUsers) {
+        const [latestUsers, latestActivity] = await Promise.all([
+          api.users(),
+          api.activityLogs(100),
+        ]);
+        setUsers(latestUsers);
+        setActivityLogs(latestActivity);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed.');
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, []);
+  }, [permissions.canManageUsers]);
 
   useEffect(() => {
     void refresh();
@@ -249,6 +287,7 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
   }, [refresh]);
 
   const handleRun = async () => {
+    if (!permissions.canRunAutomation) return;
     setIsRunning(true);
     try {
       await api.runAutomation();
@@ -272,31 +311,57 @@ function Dashboard({ role, onSignOut }: { role: UserRole; onSignOut: () => void 
   return (
     <>
       <Workboard
-        role={role}
+        user={user}
+        permissions={permissions}
         uploads={uploads}
         accounts={accounts}
         schedules={schedules}
-        folderConnections={folderConnections}
+        storageConnections={storageConnections}
+        users={users}
+        activityLogs={activityLogs}
         loading={loading}
         error={error}
         isRunning={isRunning}
         onRun={handleRun}
         onRefresh={() => void refresh()}
         onSignOut={onSignOut}
-        onOpenFolder={setFolderPlatform}
-        onOpenSchedules={() => setScheduleManagerOpen(true)}
+        onOpenSchedules={() => permissions.canSchedulePosts && setScheduleManagerOpen(true)}
+        onOpenStorageAccess={() => setStorageAccessOpen(true)}
+        onOpenUsers={() => setUserManagerOpen(true)}
+        onOpenActivity={() => setActivityOpen(true)}
         onEdit={setEditingUpload}
-        activeFolder={folderPlatform}
         editingUpload={editingUpload}
-        onCloseFolder={() => setFolderPlatform(null)}
         onCloseEdit={() => setEditingUpload(null)}
       />
+      {storageAccessOpen && (
+        <StorageAccessModal
+          accounts={accounts}
+          storageConnections={storageConnections}
+          permissions={permissions}
+          onClose={() => setStorageAccessOpen(false)}
+          onSuccess={() => void refresh()}
+        />
+      )}
       {scheduleManagerOpen && (
         <ScheduleManagerModal
           schedules={schedules}
           uploads={uploads}
           onClose={() => setScheduleManagerOpen(false)}
           onSuccess={() => void refresh()}
+        />
+      )}
+      {userManagerOpen && permissions.canManageUsers && (
+        <UserManagementModal
+          currentUser={user}
+          users={users}
+          onClose={() => setUserManagerOpen(false)}
+          onSuccess={() => void refresh(false)}
+        />
+      )}
+      {activityOpen && permissions.canViewActivity && (
+        <ActivityLogModal
+          activityLogs={activityLogs}
+          onClose={() => setActivityOpen(false)}
         />
       )}
       {automationNotice && (
@@ -372,42 +437,48 @@ function formatCalendarHeading(dayKey: string) {
 }
 
 function Workboard({
-  role,
+  user,
+  permissions,
   uploads,
   accounts,
   schedules,
-  folderConnections,
+  storageConnections,
+  users,
+  activityLogs,
   loading,
   error,
   isRunning,
   onRun,
   onRefresh,
   onSignOut,
-  onOpenFolder,
   onOpenSchedules,
+  onOpenStorageAccess,
+  onOpenUsers,
+  onOpenActivity,
   onEdit,
-  activeFolder,
   editingUpload,
-  onCloseFolder,
   onCloseEdit,
 }: {
-  role: UserRole;
+  user: UserProfile;
+  permissions: RolePermissions;
   uploads: PlatformUpload[];
   accounts: PlatformAccount[];
   schedules: PublishingSchedule[];
-  folderConnections: FolderConnection[];
+  storageConnections: StorageConnection[];
+  users: UserProfile[];
+  activityLogs: ActivityLog[];
   loading: boolean;
   error: string | null;
   isRunning: boolean;
   onRun: () => void;
   onRefresh: () => void;
   onSignOut: () => void;
-  onOpenFolder: (platform: Platform) => void;
   onOpenSchedules: () => void;
+  onOpenStorageAccess: () => void;
+  onOpenUsers: () => void;
+  onOpenActivity: () => void;
   onEdit: (upload: PlatformUpload) => void;
-  activeFolder: Platform | null;
   editingUpload: PlatformUpload | null;
-  onCloseFolder: () => void;
   onCloseEdit: () => void;
 }) {
   const [calendarMonth, setCalendarMonth] = useState(() => {
@@ -495,6 +566,7 @@ function Workboard({
     });
   }, [broadcastMix, deliveredTotal]);
   const trackingSummary = `${metrics.total} tracked ${metrics.total === 1 ? 'post' : 'posts'} across ${accounts.length} publishing ${accounts.length === 1 ? 'account' : 'accounts'}`;
+  const canEditPosts = permissions.canEditContent || permissions.canSchedulePosts;
 
   const shiftCalendarMonth = (amount: number) => {
     const next = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + amount, 1);
@@ -520,9 +592,12 @@ function Workboard({
         </nav>
         <div className='workboard-actions'>
           <span className='workboard-status'><CircleDashed size={14} className={loading ? 'spin' : ''} />Live</span>
-          <button className='workboard-run' onClick={onRun} disabled={isRunning}>{isRunning ? <Loader2 className='spin' size={16} /> : <Send size={16} />}{isRunning ? 'Publishing' : 'Run automation'}</button>
+          {permissions.canManageStorageAccess && <button className='workboard-run' onClick={onOpenStorageAccess}><FolderSync size={16} />Storage</button>}
+          {permissions.canViewActivity && <button className='workboard-tool' title='Activity log' onClick={onOpenActivity}><ListFilter size={18} /></button>}
+          {permissions.canManageUsers && <button className='workboard-tool' title='Manage users' onClick={onOpenUsers}><UsersRound size={18} /></button>}
+          {permissions.canRunAutomation && <button className='workboard-run' onClick={onRun} disabled={isRunning}>{isRunning ? <Loader2 className='spin' size={16} /> : <Send size={16} />}{isRunning ? 'Publishing' : 'Run automation'}</button>}
           <button className='workboard-tool' title='Refresh workspace' onClick={onRefresh}><RefreshCw size={18} className={loading ? 'spin' : ''} /></button>
-          <span className='workboard-user' title={loginCredentials[role].label}>{role === 'manager' ? 'OM' : 'CU'}</span>
+          <span className='workboard-user' title={`${user.fullName} - ${userRoleLabels[user.role]}`}>{roleInitials[user.role]}</span>
           <button className='workboard-tool signout-tool' title='Sign out' onClick={onSignOut}><LogOut size={18} /></button>
         </div>
       </header>
@@ -540,16 +615,17 @@ function Workboard({
       </section>
 
       <section className='platform-metrics' id='channels' aria-labelledby='post-metrics-heading'>
-        <header className='workboard-section-head'><div><p className='section-kicker'>Channel control</p><h2 id='post-metrics-heading'>Publishing channels</h2></div><span>Open a channel to manage its media</span></header>
+        <header className='workboard-section-head'><div><p className='section-kicker'>Channel control</p><h2 id='post-metrics-heading'>Publishing channels</h2></div><span>{permissions.canManageStorageAccess ? 'Open Storage Access to manage media sources' : 'Storage access is manager-only'}</span></header>
         <div className='platform-metric-grid'>
           {platforms.map(platform => {
             const platformPosts = uploads.filter(upload => upload.platform === platform);
             const platformAccounts = accounts.filter(account => account.platform === platform);
+            const platformStorage = storageConnections.filter(connection => connection.platform === platform);
             return (
-              <button key={platform} className={`platform-metric-card platform-${platform}`} onClick={() => onOpenFolder(platform)} title={`Manage ${platformLabels[platform]} folder`}>
+              <button key={platform} className={`platform-metric-card platform-${platform}`} onClick={() => permissions.canManageStorageAccess && onOpenStorageAccess()} title={permissions.canManageStorageAccess ? `Manage ${platformLabels[platform]} storage access` : `${platformLabels[platform]} overview`} aria-disabled={!permissions.canManageStorageAccess}>
                 <div className='platform-metric-card-top'><CustomIcon platform={platform} size={34} /><span>{platformLabels[platform]}</span><ChevronRight size={16} /></div>
                 <div className='platform-metric-number'><strong>{platformPosts.length}</strong><span>posts</span></div>
-                <div className='platform-account-summary'><UsersRound size={13} /><span>{platformAccounts.length} {platformAccounts.length === 1 ? 'account' : 'accounts'}</span></div>
+                <div className='platform-account-summary'><UsersRound size={13} /><span>{platformAccounts.length} {platformAccounts.length === 1 ? 'account' : 'accounts'} · {platformStorage.length} storage</span></div>
               </button>
             );
           })}
@@ -559,12 +635,12 @@ function Workboard({
       <section className='workboard-schedule-manager' aria-labelledby='schedule-manager-heading'>
         <header className='workboard-section-head'>
           <div><p className='section-kicker'>Reusable timing</p><h2 id='schedule-manager-heading'>Schedule manager</h2></div>
-          <button className='btn-primary' onClick={onOpenSchedules}><CalendarClock size={16} />Add or manage</button>
+          {permissions.canSchedulePosts && <button className='btn-primary' onClick={onOpenSchedules}><CalendarClock size={16} />Add or manage</button>}
         </header>
         <div className='schedule-card-grid'>
-          {schedules.length === 0 ? <button className='schedule-empty-card' onClick={onOpenSchedules}><CalendarClock size={24} /><span><strong>No schedules yet</strong><small>Create schedules like Daily, Weekly, Monthly, One time, or Custom.</small></span><ChevronRight size={18} /></button> : schedules.map(schedule => {
+          {schedules.length === 0 ? <button className='schedule-empty-card' onClick={onOpenSchedules} disabled={!permissions.canSchedulePosts}><CalendarClock size={24} /><span><strong>No schedules yet</strong><small>Create schedules like Daily, Weekly, Monthly, One time, or Custom.</small></span><ChevronRight size={18} /></button> : schedules.map(schedule => {
             const assignedPosts = uploads.filter(upload => upload.scheduleId === schedule.id).length;
-            return <button className='schedule-summary-card' key={schedule.id} onClick={onOpenSchedules}>
+            return <button className='schedule-summary-card' key={schedule.id} onClick={onOpenSchedules} disabled={!permissions.canSchedulePosts}>
               <span className='schedule-card-id'>#{schedule.id}</span>
               <span className='schedule-card-main'><strong>{schedule.name}</strong><small>{schedule.frequency === 'custom' ? schedule.customCronExpression : `${scheduleFrequencyLabels[schedule.frequency]} at ${schedule.time}`}{schedule.endDate ? ` until ${schedule.endDate}` : ''}</small></span>
               <span className={`schedule-card-state ${schedule.status}`}>{schedule.status}</span>
@@ -586,13 +662,13 @@ function Workboard({
           <article className='review-queue-board'>
             <header className='workboard-section-head'><div><p className='section-kicker'>Pre-publish review</p><h2>Review queue</h2></div><span>{reviewQueue.length} open</span></header>
             <div className='review-queue-list'>{reviewQueue.length === 0 ? <div className='review-queue-empty'><CircleCheckBig size={24} /><strong>Nothing waiting for review.</strong><span>Every tracked post has been delivered.</span></div> : reviewQueue.map(upload => (
-              <button className='review-queue-row' key={upload.id} onClick={() => onEdit(upload)}>
+              <button className='review-queue-row' key={upload.id} onClick={() => canEditPosts && onEdit(upload)} disabled={!canEditPosts}>
                 <div className={`review-queue-media review-${upload.status}`}><PostMediaPreview upload={upload} compact /><i><CustomIcon platform={upload.platform} size={17} /></i></div>
                 <span><strong>{upload.title || upload.originalName}</strong><small>{accountById.get(upload.accountId)?.handle ?? platformLabels[upload.platform]} · {upload.status === 'failed' ? 'Needs review' : upload.scheduledAt ? formatEventTime(upload.scheduledAt) : upload.status === 'processing' ? 'Publishing now' : 'Needs a publish time'}</small></span>
                 <Pencil size={14} />
               </button>
             ))}</div>
-            {reviewQueue.length > 0 && <footer className='review-queue-footer'>Select any post to inspect its platform preview and edit details.</footer>}
+            {reviewQueue.length > 0 && <footer className='review-queue-footer'>{canEditPosts ? 'Select any post to inspect its platform preview and edit details.' : 'Your role can view this queue but cannot edit posts.'}</footer>}
           </article>
         </section>
 
@@ -619,7 +695,7 @@ function Workboard({
         <article className='legacy-next-action-board'>
           <header className='workboard-section-head'><div><p className='section-kicker'>Next action</p><h2>{nextAction ? 'Ready for its moment' : 'Nothing scheduled yet'}</h2></div><CalendarClock size={20} /></header>
           {nextAction ? (
-            <button className='next-action-content' onClick={() => onEdit(nextAction)}>
+            <button className='next-action-content' onClick={() => canEditPosts && onEdit(nextAction)} disabled={!canEditPosts}>
               <CustomIcon platform={nextAction.platform} size={29} />
               <span><strong>{nextAction.title || nextAction.originalName}</strong><small>{accountById.get(nextAction.accountId)?.handle ?? platformLabels[nextAction.platform]} · {formatEventTime(nextAction.scheduledAt ?? nextAction.updatedAt)}</small></span>
               <Pencil size={16} />
@@ -636,7 +712,7 @@ function Workboard({
               {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => <span className='calendar-weekday' key={day}>{day}</span>)}
               {calendarDays.map(day => <button type='button' key={day.dayKey} className={`calendar-day ${day.currentMonth ? '' : 'outside-month'} ${day.dayKey === selectedDay ? 'selected-day' : ''} ${day.events.length ? 'has-events' : ''}`} onClick={() => setSelectedDay(day.dayKey)} aria-label={`${formatCalendarHeading(day.dayKey)}, ${day.events.length} events`}><span className='calendar-day-number'>{day.date.getDate()}</span><span className='calendar-event-icons'>{day.events.slice(0, 3).map(upload => <CustomIcon key={upload.id} platform={upload.platform} size={14} />)}{day.events.length > 3 && <span className='calendar-more-events'>+{day.events.length - 3}</span>}</span></button>)}
             </div>
-            <aside className='workboard-day-inspector'><div><span>{formatCalendarHeading(selectedDay)}</span><strong>{selectedEvents.length}</strong></div>{selectedEvents.length === 0 ? <p>No publishing activity on this day.</p> : selectedEvents.map(upload => <button key={upload.id} onClick={() => onEdit(upload)}><CustomIcon platform={upload.platform} size={17} /><span><strong>{upload.title || upload.originalName}</strong><small>{accountById.get(upload.accountId)?.handle ?? platformLabels[upload.platform]} · {getAuditAction(upload)}</small></span><time>{new Date(getAuditTimestamp(upload)).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</time></button>)}</aside>
+            <aside className='workboard-day-inspector'><div><span>{formatCalendarHeading(selectedDay)}</span><strong>{selectedEvents.length}</strong></div>{selectedEvents.length === 0 ? <p>No publishing activity on this day.</p> : selectedEvents.map(upload => <button key={upload.id} onClick={() => canEditPosts && onEdit(upload)} disabled={!canEditPosts}><CustomIcon platform={upload.platform} size={17} /><span><strong>{upload.title || upload.originalName}</strong><small>{accountById.get(upload.accountId)?.handle ?? platformLabels[upload.platform]} · {getAuditAction(upload)}</small></span><time>{new Date(getAuditTimestamp(upload)).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</time></button>)}</aside>
           </div>
         </article>
 
@@ -661,159 +737,10 @@ function Workboard({
         </article>
       </section>
 
-      {activeFolder && <FolderConnectionModal platform={activeFolder} accounts={accounts.filter(item => item.platform === activeFolder)} schedules={schedules} connections={folderConnections.filter(item => item.platform === activeFolder)} uploads={uploads.filter(item => item.platform === activeFolder)} onEdit={onEdit} onClose={onCloseFolder} onSuccess={onRefresh} />}
-      {editingUpload && <EditPostModal upload={editingUpload} accounts={accounts.filter(item => item.platform === editingUpload.platform)} schedules={schedules} onClose={onCloseEdit} onSuccess={onRefresh} />}
+      {editingUpload && canEditPosts && <EditPostModal upload={editingUpload} accounts={accounts.filter(item => item.platform === editingUpload.platform)} schedules={schedules} permissions={permissions} onClose={onCloseEdit} onSuccess={onRefresh} />}
       </section>
     </main>
   );
-}
-
-function FolderConnectionModal({ platform, accounts, schedules, connections, uploads, onEdit, onClose, onSuccess }: {
-  platform: Platform;
-  accounts: PlatformAccount[];
-  schedules: PublishingSchedule[];
-  connections: FolderConnection[];
-  uploads: PlatformUpload[];
-  onEdit: (upload: PlatformUpload) => void;
-  onClose: () => void;
-  onSuccess: () => void;
-}) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [formAccount, setFormAccount] = useState<PlatformAccount | 'new' | null>(null);
-  const [displayName, setDisplayName] = useState('');
-  const [handle, setHandle] = useState('');
-  const [loginIdentifier, setLoginIdentifier] = useState('');
-  const [loginConfirmation, setLoginConfirmation] = useState('');
-  const [password, setPassword] = useState('');
-  const [enabled, setEnabled] = useState(true);
-  const [folderPath, setFolderPath] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  const selectedAccount = accounts.find(account => account.id === selectedId);
-  const connection = connections.find(item => item.accountId === selectedId);
-  const accountUploads = uploads.filter(upload => upload.accountId === selectedId);
-
-  useEffect(() => {
-    setFolderPath(connection?.folderPath ?? '');
-  }, [connection?.id, connection?.folderPath]);
-
-  const openAccountForm = (account?: PlatformAccount) => {
-    setFormAccount(account ?? 'new');
-    setDisplayName(account?.displayName ?? '');
-    setHandle(account?.handle ?? '');
-    setLoginIdentifier(account?.loginIdentifier === 'Existing browser session' ? '' : account?.loginIdentifier ?? '');
-    setLoginConfirmation(account?.loginConfirmation ?? '');
-    setPassword('');
-    setEnabled(account?.enabled ?? true);
-  };
-
-  const saveAccount = async () => {
-    if (!displayName.trim() || !handle.trim() || !loginIdentifier.trim()) return alert('Complete the account name, handle, and login identifier.');
-    if (formAccount === 'new' && !password) return alert('Password is required for a new account.');
-    setLoading(true);
-    try {
-      const payload = { displayName: displayName.trim(), handle: handle.trim(), loginIdentifier: loginIdentifier.trim(), loginConfirmation: loginConfirmation.trim() || undefined, password: password || undefined, enabled };
-      const saved = formAccount === 'new' ? await api.createAccount(platform, payload) : await api.updateAccount(formAccount!.id, payload);
-      setSelectedId(saved.id);
-      setFormAccount(null);
-      onSuccess();
-    } catch (error) {
-      alert('Error: ' + (error instanceof Error ? error.message : 'Could not save account'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const connect = async () => {
-    if (!selectedAccount || !folderPath.trim()) return alert('Enter the full folder path.');
-    setLoading(true);
-    try {
-      await api.connectFolder(selectedAccount.id, folderPath.trim());
-      onSuccess();
-    } catch (error) {
-      alert('Error: ' + (error instanceof Error ? error.message : 'Could not connect folder'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const disconnect = async () => {
-    if (!connection || !confirm(`Disconnect the folder for ${selectedAccount?.handle}?`)) return;
-    setLoading(true);
-    try {
-      await api.disconnectFolder(connection.id);
-      setFolderPath('');
-      onSuccess();
-    } catch (error) {
-      alert('Error: ' + (error instanceof Error ? error.message : 'Could not disconnect folder'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const removeAccount = async () => {
-    if (!selectedAccount || !confirm(`Delete ${selectedAccount.handle}?`)) return;
-    setLoading(true);
-    try {
-      await api.deleteAccount(selectedAccount.id);
-      setSelectedId(null);
-      onSuccess();
-    } catch (error) {
-      alert('Error: ' + (error instanceof Error ? error.message : 'Could not delete account'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return <div className='modal-overlay' onClick={onClose}>
-    <div className='modal-panel account-manager-modal' onClick={event => event.stopPropagation()}>
-      <div className='modal-head'><span>{platformLabels[platform]} publishing accounts</span><button onClick={onClose}><X size={22} /></button></div>
-      <div className='modal-body'>
-        {formAccount ? <div className='account-form'>
-          <div className='account-form-heading'><CustomIcon platform={platform} size={34} /><div><strong>{formAccount === 'new' ? `Add ${platformLabels[platform]} account` : 'Edit publishing account'}</strong><span>Posts, folders, credentials, and browser sessions remain isolated per account.</span></div></div>
-          <div className='account-form-grid'>
-            <div className='field'><label>Account name</label><input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder='Main brand account' /></div>
-            <div className='field'><label>Public handle</label><input value={handle} onChange={event => setHandle(event.target.value)} placeholder='@yourbrand' /></div>
-            <div className='field account-form-wide'><label>Login email or username</label><input value={loginIdentifier} onChange={event => setLoginIdentifier(event.target.value)} autoComplete='username' /></div>
-            <div className='field account-form-wide'><label>{formAccount === 'new' ? 'Password' : 'New password (leave blank to keep current)'}</label><input type='password' value={password} onChange={event => setPassword(event.target.value)} autoComplete='new-password' /></div>
-            {platform === 'x' && <div className='field account-form-wide'><label>Login confirmation (optional username or phone)</label><input value={loginConfirmation} onChange={event => setLoginConfirmation(event.target.value)} /></div>}
-          </div>
-          <label className='account-enabled-toggle'><input type='checkbox' checked={enabled} onChange={event => setEnabled(event.target.checked)} /><span><strong>Automation enabled</strong><small>Allow scheduled posts to run through this account</small></span></label>
-          <div className='account-form-actions'><button className='btn-outline' onClick={() => setFormAccount(null)}>Cancel</button><button className='btn-primary' onClick={saveAccount} disabled={loading}>{loading ? <Loader2 className='spin' size={17} /> : <ShieldCheck size={17} />}Save account</button></div>
-        </div> : selectedAccount ? <div className='account-detail'>
-          <button className='account-back' onClick={() => setSelectedId(null)}><ChevronLeft size={16} />All {platformLabels[platform]} accounts</button>
-          <div className='account-detail-head'><CustomIcon platform={platform} size={38} /><div><strong>{selectedAccount.displayName}</strong><span>{selectedAccount.handle} · {selectedAccount.enabled ? 'Automation enabled' : 'Automation paused'}</span></div><button className='btn-outline' onClick={() => openAccountForm(selectedAccount)}><Pencil size={14} />Edit</button></div>
-          <div className='account-status-strip'>
-            <span><strong>{accountUploads.length}</strong><small>All posts</small></span>
-            <span><strong>{accountUploads.filter(item => item.status === 'queued').length}</strong><small>Queued</small></span>
-            <span><strong>{accountUploads.filter(item => item.status === 'posted').length}</strong><small>Published</small></span>
-            <span><strong>{accountUploads.filter(item => item.status === 'failed').length}</strong><small>Failed</small></span>
-          </div>
-          <section className='account-folder-panel'>
-            <div className='account-subhead'><div><strong>Account media folder</strong><span>Files detected here are assigned only to {selectedAccount.handle}.</span></div><span className={`connection-state ${connection?.lastError ? 'error' : connection ? 'active' : ''}`}>{connection?.lastError ? 'Sync error' : connection ? 'Connected' : 'Not connected'}</span></div>
-            <div className='account-folder-control'><input value={folderPath} onChange={event => setFolderPath(event.target.value)} placeholder={`C:\\Posts\\${platformLabels[platform]}\\${selectedAccount.handle.replace('@', '')}`} /><button className='btn-primary' onClick={connect} disabled={loading}>{loading ? <Loader2 className='spin' size={16} /> : <FolderSync size={16} />}{connection ? 'Update' : 'Connect'}</button></div>
-            {connection?.lastScannedAt && <small className='folder-scan-time'>Last synced {new Date(connection.lastScannedAt).toLocaleString()}</small>}
-            {connection?.lastError && <div className='folder-error'>{connection.lastError}</div>}
-          </section>
-          <section className='folder-posts'>
-            <div className='folder-posts-head'><strong>Posts assigned to this account</strong><span>{accountUploads.length}</span></div>
-            {accountUploads.length === 0 ? <div className='folder-posts-empty'>No posts assigned yet</div> : accountUploads.map(upload => {
-              const uploadSchedule = upload.scheduleId ? schedules.find(schedule => schedule.id === upload.scheduleId) : undefined;
-              return <button className='folder-post-row' key={upload.id} onClick={() => onEdit(upload)}><FileText size={18} /><span className='folder-post-name'>{upload.folderSource?.relativePath ?? upload.originalName}</span><span className='folder-post-schedule'>{upload.status === 'posted' ? 'Published' : upload.scheduledAt ? new Date(upload.scheduledAt).toLocaleString() : uploadSchedule ? uploadSchedule.name : 'Needs schedule'}</span><CalendarClock size={16} /></button>;
-            })}
-          </section>
-          <div className='account-danger-actions'>{connection && <button className='btn-danger' onClick={disconnect} disabled={loading}><Unplug size={15} />Disconnect folder</button>}<button className='btn-danger ghost-danger' onClick={removeAccount} disabled={loading || Boolean(connection) || accountUploads.length > 0}><Trash2 size={15} />Delete account</button></div>
-        </div> : <div className='account-list-view'>
-          <div className='account-list-intro'><div><strong>{accounts.length} connected {accounts.length === 1 ? 'account' : 'accounts'}</strong><span>Choose exactly where each post is published.</span></div><button className='btn-primary' onClick={() => openAccountForm()}><UsersRound size={16} />Add account</button></div>
-          <div className='publishing-account-list'>{accounts.length === 0 ? <div className='account-list-empty'><UsersRound size={27} /><strong>No {platformLabels[platform]} accounts yet</strong><span>Add the first account to connect its folder and begin routing posts.</span><button className='btn-primary' onClick={() => openAccountForm()}>Add first account</button></div> : accounts.map(account => {
-            const items = uploads.filter(upload => upload.accountId === account.id);
-            const accountConnection = connections.find(item => item.accountId === account.id);
-            return <button className='publishing-account-row' key={account.id} onClick={() => setSelectedId(account.id)}><span className='publishing-account-icon'><CustomIcon platform={platform} size={28} /><i className={account.enabled ? 'online' : ''} /></span><span className='publishing-account-identity'><strong>{account.displayName}</strong><small>{account.handle}</small></span><span className='publishing-account-metric'><strong>{items.length}</strong><small>posts</small></span><span className='publishing-account-metric published'><strong>{items.filter(item => item.status === 'posted').length}</strong><small>published</small></span><span className={`publishing-account-source ${accountConnection ? 'connected' : ''}`}><FolderOpen size={15} />{accountConnection ? 'Folder connected' : 'Connect folder'}</span><ChevronRight size={18} /></button>;
-          })}</div>
-        </div>}
-      </div>
-    </div>
-  </div>;
 }
 
 function ScheduleManagerModal({ schedules, uploads, onClose, onSuccess }: {
@@ -928,6 +855,252 @@ function ScheduleManagerModal({ schedules, uploads, onClose, onSuccess }: {
   </div>;
 }
 
+function StorageAccessModal({ accounts, storageConnections, permissions, onClose, onSuccess }: {
+  accounts: PlatformAccount[];
+  storageConnections: StorageConnection[];
+  permissions: RolePermissions;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const firstPlatform = platforms.find(platform => accounts.some(account => account.platform === platform && account.enabled)) ?? platforms[0];
+  const [platform, setPlatform] = useState<Platform>(firstPlatform);
+  const [accountId, setAccountId] = useState('');
+  const [storageType, setStorageType] = useState<StorageSourceType>('local_drive');
+  const [displayName, setDisplayName] = useState('');
+  const [folderPath, setFolderPath] = useState('');
+  const [driveFolderId, setDriveFolderId] = useState('');
+  const [driveFolderUrl, setDriveFolderUrl] = useState('');
+  const [driveFolderName, setDriveFolderName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const platformAccounts = accounts.filter(account => account.platform === platform && account.enabled);
+
+  useEffect(() => {
+    setAccountId(platformAccounts[0]?.id ?? '');
+  }, [platform, platformAccounts[0]?.id]);
+
+  const save = async () => {
+    if (!accountId) return alert('Choose a publishing account.');
+    if (storageType === 'local_drive' && !folderPath.trim()) return alert('Local folder path is required.');
+    if (storageType === 'google_drive' && !driveFolderId.trim() && !driveFolderUrl.trim()) return alert('Google Drive folder id or URL is required.');
+
+    setLoading(true);
+    try {
+      if (storageType === 'local_drive') {
+        await api.createLocalDriveConnection({
+          accountId,
+          folderPath: folderPath.trim(),
+          displayName: displayName.trim() || undefined,
+        });
+      } else {
+        await api.createGoogleDriveConnection({
+          accountId,
+          displayName: displayName.trim() || driveFolderName.trim() || 'Google Drive source',
+          googleDriveFolderId: driveFolderId.trim() || undefined,
+          googleDriveFolderUrl: driveFolderUrl.trim() || undefined,
+          googleDriveFolderName: driveFolderName.trim() || undefined,
+        });
+      }
+      onSuccess();
+      setDisplayName('');
+      setFolderPath('');
+      setDriveFolderId('');
+      setDriveFolderUrl('');
+      setDriveFolderName('');
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not save storage access'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const syncConnection = async (connection: StorageConnection) => {
+    setLoading(true);
+    try {
+      await api.syncStorageConnection(connection.id);
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not sync storage source'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeConnection = async (connection: StorageConnection) => {
+    if (!confirm(`Remove ${connection.displayName}?`)) return;
+    setLoading(true);
+    try {
+      await api.deleteStorageConnection(connection.id);
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not remove storage source'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const accountName = (accountId: string) => {
+    const account = accounts.find(item => item.id === accountId);
+    return account ? `${account.displayName} (${account.handle})` : 'Publishing account';
+  };
+
+  return <div className='modal-overlay' onClick={onClose}>
+    <div className='modal-panel account-manager-modal storage-access-modal' onClick={event => event.stopPropagation()}>
+      <div className='modal-head'><span>Storage Access</span><button onClick={onClose}><X size={22} /></button></div>
+      <div className='modal-body'>
+        <div className='account-form'>
+          <div className='account-form-heading'><FolderSync size={34} /><div><strong>Add storage source</strong><span>Connect Local Drive or Google Drive as the media source for posts.</span></div></div>
+          <div className='account-form-grid'>
+            <div className='field'><label>Storage type</label><select value={storageType} onChange={event => setStorageType(event.target.value as StorageSourceType)}><option value='local_drive'>Local Drive</option><option value='google_drive'>Google Drive</option></select></div>
+            <div className='field'><label>Platform</label><select value={platform} onChange={event => setPlatform(event.target.value as Platform)}>{platforms.map(item => <option key={item} value={item}>{platformLabels[item]}</option>)}</select></div>
+            <div className='field'><label>Publishing account</label><select value={accountId} onChange={event => setAccountId(event.target.value)}><option value=''>Choose account</option>{platformAccounts.map(account => <option key={account.id} value={account.id}>{account.displayName} ({account.handle})</option>)}</select></div>
+            <div className='field account-form-wide'><label>Display name</label><input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder={storageType === 'local_drive' ? 'Local campaign folder' : 'Google Drive campaign folder'} /></div>
+            {storageType === 'local_drive' && <div className='field account-form-wide'><label>Local folder path</label><input value={folderPath} onChange={event => setFolderPath(event.target.value)} placeholder='C:\\Posts\\Instagram' /></div>}
+            {storageType === 'google_drive' && <>
+              <div className='field'><label>Drive folder id</label><input value={driveFolderId} onChange={event => setDriveFolderId(event.target.value)} placeholder='1AbCDEF...' /></div>
+              <div className='field'><label>Drive folder name</label><input value={driveFolderName} onChange={event => setDriveFolderName(event.target.value)} placeholder='Campaign posts' /></div>
+              <div className='field account-form-wide'><label>Drive folder URL</label><input value={driveFolderUrl} onChange={event => setDriveFolderUrl(event.target.value)} placeholder='https://drive.google.com/drive/folders/...' /></div>
+            </>}
+          </div>
+          <div className='account-form-actions'><button className='btn-outline' onClick={onClose}>Close</button><button className='btn-primary' onClick={save} disabled={loading || !permissions.canManageStorageAccess}>{loading ? <Loader2 className='spin' size={17} /> : <FolderSync size={17} />}Add source</button></div>
+        </div>
+        <div className='account-list-view storage-access-list-view'>
+          <div className='account-list-intro'><div><strong>{storageConnections.length} storage {storageConnections.length === 1 ? 'source' : 'sources'}</strong><span>Media imports should come from these connected sources.</span></div></div>
+          <div className='storage-access-list'>
+            {storageConnections.length === 0 ? <div className='account-list-empty'><FolderOpen size={27} /><strong>No storage sources yet</strong><span>Add a Local Drive or Google Drive connection to start importing media.</span></div> : storageConnections.map(connection => <article className='storage-access-row' key={connection.id}>
+              <span className='publishing-account-icon'><FolderSync size={18} /></span>
+              <span><strong>{connection.displayName}</strong><small>{storageSourceTypeLabels[connection.storageType]} · {accountName(connection.accountId)}</small></span>
+              <span className={`schedule-status ${connection.status === 'connected' ? 'active' : 'inactive'}`}>{connection.status}</span>
+              <span className='storage-access-path'>{connection.storageType === 'local_drive' ? connection.localFolderPath : connection.googleDriveFolderName || connection.googleDriveFolderId || connection.googleDriveFolderUrl}</span>
+              {connection.storageType === 'local_drive' && <button className='btn-outline' onClick={() => syncConnection(connection)} disabled={loading}><RefreshCw size={14} />Sync</button>}
+              <button className='btn-danger ghost-danger' onClick={() => removeConnection(connection)} disabled={loading}><Trash2 size={14} /></button>
+            </article>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+function UserManagementModal({ currentUser, users, onClose, onSuccess }: {
+  currentUser: UserProfile;
+  users: UserProfile[];
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [editing, setEditing] = useState<UserProfile | 'new' | null>(users.length === 0 ? 'new' : null);
+  const [username, setUsername] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState<UserRole>('viewer');
+  const [isActive, setIsActive] = useState(true);
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const openForm = (user?: UserProfile) => {
+    setEditing(user ?? 'new');
+    setUsername(user?.username ?? '');
+    setFullName(user?.fullName ?? '');
+    setEmail(user?.email ?? '');
+    setRole(user?.role ?? 'viewer');
+    setIsActive(user?.isActive ?? true);
+    setPassword('');
+  };
+
+  const closeForm = () => {
+    setEditing(null);
+    setUsername('');
+    setFullName('');
+    setEmail('');
+    setRole('viewer');
+    setIsActive(true);
+    setPassword('');
+  };
+
+  const saveUser = async () => {
+    if (!username.trim()) return alert('Username is required.');
+    if (!fullName.trim()) return alert('Full name is required.');
+    if (editing === 'new' && password.length < 8) return alert('Password must be at least 8 characters.');
+    setLoading(true);
+    try {
+      if (editing === 'new') {
+        await api.createUser({ username: username.trim(), fullName: fullName.trim(), email: email.trim(), role, isActive, password });
+      } else if (editing) {
+        await api.updateUser(editing.id, { username: username.trim(), fullName: fullName.trim(), email: email.trim(), role, isActive, password: password || undefined });
+      }
+      closeForm();
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not save user'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deactivate = async (user: UserProfile) => {
+    if (user.id === currentUser.id) return alert('You cannot deactivate your own session from here.');
+    if (!confirm(`Deactivate ${user.fullName}?`)) return;
+    setLoading(true);
+    try {
+      await api.deactivateUser(user.id);
+      onSuccess();
+    } catch (error) {
+      alert('Error: ' + (error instanceof Error ? error.message : 'Could not deactivate user'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <div className='modal-overlay' onClick={onClose}>
+    <div className='modal-panel account-manager-modal user-manager-modal' onClick={event => event.stopPropagation()}>
+      <div className='modal-head'><span>User roles</span><button onClick={onClose}><X size={22} /></button></div>
+      <div className='modal-body'>
+        {editing ? <div className='account-form'>
+          <div className='account-form-heading'><UsersRound size={34} /><div><strong>{editing === 'new' ? 'Add user' : 'Edit user'}</strong><span>Managers assign one role per user. The backend enforces each role.</span></div></div>
+          <div className='account-form-grid'>
+            <div className='field'><label>Username</label><input value={username} onChange={event => setUsername(event.target.value)} /></div>
+            <div className='field'><label>Full name</label><input value={fullName} onChange={event => setFullName(event.target.value)} /></div>
+            <div className='field account-form-wide'><label>Email</label><input value={email} onChange={event => setEmail(event.target.value)} /></div>
+            <div className='field'><label>Role</label><select value={role} onChange={event => setRole(event.target.value as UserRole)}>{userRoles.map(item => <option key={item} value={item}>{userRoleLabels[item]}</option>)}</select></div>
+            <label className='account-enabled-toggle'><input type='checkbox' checked={isActive} onChange={event => setIsActive(event.target.checked)} /><span>Active user</span></label>
+            <div className='field account-form-wide'><label>{editing === 'new' ? 'Password' : 'New password'}</label><input type='password' value={password} onChange={event => setPassword(event.target.value)} autoComplete='new-password' /></div>
+          </div>
+          <div className='account-form-actions'><button className='btn-outline' onClick={closeForm}>Cancel</button><button className='btn-primary' onClick={saveUser} disabled={loading}>{loading ? <Loader2 className='spin' size={17} /> : <ShieldCheck size={17} />}Save user</button></div>
+        </div> : <div className='account-list-view'>
+          <div className='account-list-intro'><div><strong>{users.length} workspace {users.length === 1 ? 'user' : 'users'}</strong><span>Assign upload, schedule, manager, or view-only access.</span></div><button className='btn-primary' onClick={() => openForm()}><UsersRound size={16} />Add user</button></div>
+          <div className='user-role-list'>{users.map(user => <article className='user-role-row' key={user.id}>
+            <span className='workboard-user'>{roleInitials[user.role]}</span>
+            <span><strong>{user.fullName}</strong><small>{user.username} - {userRoleLabels[user.role]}</small></span>
+            <span className={`schedule-status ${user.isActive ? 'active' : 'inactive'}`}>{user.isActive ? 'active' : 'inactive'}</span>
+            <button className='btn-outline' onClick={() => openForm(user)}><Pencil size={14} />Edit</button>
+            <button className='btn-danger ghost-danger' onClick={() => deactivate(user)} disabled={loading || user.id === currentUser.id || !user.isActive}><Trash2 size={14} /></button>
+          </article>)}</div>
+        </div>}
+      </div>
+    </div>
+  </div>;
+}
+
+function ActivityLogModal({ activityLogs, onClose }: {
+  activityLogs: ActivityLog[];
+  onClose: () => void;
+}) {
+  return <div className='modal-overlay' onClick={onClose}>
+    <div className='modal-panel account-manager-modal activity-log-modal' onClick={event => event.stopPropagation()}>
+      <div className='modal-head'><span>Operations activity</span><button onClick={onClose}><X size={22} /></button></div>
+      <div className='modal-body'>
+        <div className='account-list-view'>
+          <div className='account-list-intro'><div><strong>{activityLogs.length} recent events</strong><span>Audit trail for uploads, schedules, users, accounts, folders, and automation.</span></div></div>
+          <div className='activity-log-list'>{activityLogs.length === 0 ? <div className='account-list-empty'><ListFilter size={27} /><strong>No activity yet</strong><span>New actions will appear here after users start working.</span></div> : activityLogs.map(item => <article className='activity-log-row' key={item.id}>
+            <span className='activity-dot' />
+            <span><strong>{item.summary}</strong><small>{item.actorName ?? item.actorUsername ?? 'System'} - {item.action}</small></span>
+            <time>{formatEventTime(item.createdAt)}</time>
+          </article>)}</div>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
 function PostMediaPreview({ upload, compact = false, networkPreview = false }: { upload: PlatformUpload; compact?: boolean; networkPreview?: boolean }) {
   if (upload.mimeType.startsWith('image/')) return <img src={upload.url} alt='' />;
   if (upload.mimeType.startsWith('video/')) return <video src={upload.url} controls={!compact && !networkPreview} muted playsInline autoPlay={compact} loop={compact} />;
@@ -1029,12 +1202,14 @@ function EditPostModal({
   upload,
   accounts,
   schedules,
+  permissions,
   onClose,
   onSuccess,
 }: {
   upload: PlatformUpload;
   accounts: PlatformAccount[];
   schedules: PublishingSchedule[];
+  permissions: RolePermissions;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -1049,28 +1224,34 @@ function EditPostModal({
   const [minimumSchedule] = useState(() => toLocalDateTimeInputValue(new Date(Date.now() + 60_000)));
   const [loading, setLoading] = useState(false);
   const isYouTube = upload.platform === "youtube";
+  const canEditContent = permissions.canEditContent;
+  const canEditSchedule = permissions.canSchedulePosts;
 
   const save = async () => {
-    if (!caption.trim()) return alert("Caption is required");
-    if (isYouTube && !title.trim()) return alert("Video title is required");
+    if (canEditContent && !caption.trim()) return alert("Caption is required");
+    if (canEditContent && isYouTube && !title.trim()) return alert("Video title is required");
 
     const scheduledDate = scheduleMode === 'exact' && schedule ? new Date(schedule) : null;
-    if (upload.folderSource && scheduleMode === 'none') return alert("Choose a schedule for this folder post");
-    if (scheduleMode === 'exact' && !scheduledDate) return alert("Choose a scheduled date and time.");
-    if (scheduleMode === 'template' && !scheduleId) return alert("Choose a schedule template.");
+    if (canEditSchedule && upload.folderSource && scheduleMode === 'none') return alert("Choose a schedule for this folder post");
+    if (canEditSchedule && scheduleMode === 'exact' && !scheduledDate) return alert("Choose a scheduled date and time.");
+    if (canEditSchedule && scheduleMode === 'template' && !scheduleId) return alert("Choose a schedule template.");
     if (scheduledDate && (!Number.isFinite(scheduledDate.getTime()) || scheduledDate.getTime() <= Date.now())) {
       return alert("Choose a scheduled date and time in the future");
     }
 
     setLoading(true);
     try {
-      await api.updateUploadDetails(upload.id, {
-        title: isYouTube ? title.trim() : undefined,
-        caption: caption.trim(),
-        scheduledAt: scheduleMode === 'exact' ? scheduledDate?.toISOString() ?? null : null,
-        scheduleId: scheduleMode === 'template' ? Number(scheduleId) : null,
-        accountId,
-      });
+      const payload: Record<string, unknown> = {};
+      if (canEditContent) {
+        payload.title = isYouTube ? title.trim() : undefined;
+        payload.caption = caption.trim();
+        payload.accountId = accountId;
+      }
+      if (canEditSchedule) {
+        payload.scheduledAt = scheduleMode === 'exact' ? scheduledDate?.toISOString() ?? null : null;
+        payload.scheduleId = scheduleMode === 'template' ? Number(scheduleId) : null;
+      }
+      await api.updateUploadDetails(upload.id, payload as any);
       onSuccess();
       onClose();
     } catch (error) {
@@ -1083,7 +1264,7 @@ function EditPostModal({
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-panel preview-modal" onClick={event => event.stopPropagation()}>
-        <div className="modal-head"><span>Schedule Post</span><button onClick={onClose}><X size={22} /></button></div>
+        <div className="modal-head"><span>{canEditContent && canEditSchedule ? 'Edit post' : canEditSchedule ? 'Schedule post' : 'Edit content'}</span><button onClick={onClose}><X size={22} /></button></div>
         <div className="modal-body">
           <div className="post-editor-workspace">
             <div className="post-editor-form">
@@ -1093,15 +1274,15 @@ function EditPostModal({
               </div>
               <div className='field'><label>Publish through account</label><select value={accountId} onChange={event => setAccountId(event.target.value)} disabled={Boolean(upload.folderSource)}>{accounts.map(account => <option key={account.id} value={account.id}>{account.displayName} ({account.handle}){account.enabled ? '' : ' — paused'}</option>)}</select>{upload.folderSource && <small className='field-help'>This post is locked to the account that owns its source folder.</small>}</div>
               {isYouTube && (
-                <div className="field"><label>Video title</label><input type="text" value={title} onChange={event => setTitle(event.target.value)} /></div>
+                <div className="field"><label>Video title</label><input type="text" value={title} onChange={event => setTitle(event.target.value)} disabled={!canEditContent} /></div>
               )}
               <div className="field">
                 <label>{isYouTube ? "Description" : "Caption"}</label>
-                <textarea rows={5} value={caption} onChange={event => setCaption(event.target.value)} />
+                <textarea rows={5} value={caption} onChange={event => setCaption(event.target.value)} disabled={!canEditContent} />
               </div>
               <div className="field">
                 <label>Schedule option</label>
-                <select value={scheduleMode} onChange={event => setScheduleMode(event.target.value as 'none' | 'exact' | 'template')}>
+                <select value={scheduleMode} onChange={event => setScheduleMode(event.target.value as 'none' | 'exact' | 'template')} disabled={!canEditSchedule}>
                   <option value='none'>No schedule yet</option>
                   <option value='exact'>Exact date and time</option>
                   <option value='template'>Use schedule template</option>
@@ -1109,11 +1290,11 @@ function EditPostModal({
               </div>
               {scheduleMode === 'exact' && <div className="field">
                 <label>Scheduled date and time</label>
-                <input type="datetime-local" min={minimumSchedule} value={schedule} onChange={event => setSchedule(event.target.value)} />
+                <input type="datetime-local" min={minimumSchedule} value={schedule} onChange={event => setSchedule(event.target.value)} disabled={!canEditSchedule} />
               </div>}
               {scheduleMode === 'template' && <div className="field">
                 <label>Schedule template</label>
-                <select value={scheduleId} onChange={event => setScheduleId(event.target.value ? Number(event.target.value) : '')}>
+                <select value={scheduleId} onChange={event => setScheduleId(event.target.value ? Number(event.target.value) : '')} disabled={!canEditSchedule}>
                   <option value=''>Choose schedule</option>
                   {schedules.map(scheduleItem => <option key={scheduleItem.id} value={scheduleItem.id}>#{scheduleItem.id} {scheduleItem.name} - {scheduleFrequencyLabels[scheduleItem.frequency]} at {scheduleItem.time}{scheduleItem.status === 'inactive' ? ' (inactive)' : ''}</option>)}
                 </select>
@@ -1126,7 +1307,7 @@ function EditPostModal({
         <div className="modal-foot">
           <button className="btn-outline" onClick={onClose}>Cancel</button>
           <button className="btn-primary" onClick={save} disabled={loading}>
-            {loading ? <Loader2 className="spin" size={17} /> : <Pencil size={17} />} Save schedule
+            {loading ? <Loader2 className="spin" size={17} /> : <Pencil size={17} />} Save
           </button>
         </div>
       </div>

@@ -1,24 +1,59 @@
 import type {
+  ActivityLog,
   AutomationInput,
+  CreateUserProfileInput,
   DashboardSummary,
-  FolderConnection,
+  CreateGoogleDriveStorageConnectionInput,
+  CreateLocalDriveStorageConnectionInput,
+  LoginInput,
   Platform,
   PlatformAccount,
   PlatformUpload,
   PublishingSchedule,
   SocialMediaSchedule,
+  StorageConnection,
   UpdateUploadDetailsInput,
   UpdateUploadStatusInput,
+  UpdateUserProfileInput,
   UpsertPlatformAccountInput,
-  UpsertPublishingScheduleInput
+  UpsertPublishingScheduleInput,
+  UserProfile
 } from "../../shared/schema";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
+let authToken: string | null = null;
+
+export type AuthResponse = {
+  user: UserProfile;
+  token: string;
+};
+
+export type LocalDriveConnectionResponse = {
+  connection: StorageConnection;
+  sync: {
+    added: number;
+    updated: number;
+    removed: number;
+    retainedHistory?: number;
+  };
+};
+
+export function setAuthToken(token: string | null) {
+  authToken = token;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!(init?.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (authToken) {
+    headers.set("Authorization", `Bearer ${authToken}`);
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
-    ...init
+    ...init,
+    headers
   });
 
   if (!response.ok) {
@@ -39,6 +74,11 @@ export function assetUrl(url: string) {
 }
 
 export const api = {
+  login: (payload: LoginInput) =>
+    request<AuthResponse>("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
+
+  me: () => request<UserProfile>("/api/auth/me"),
+
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   
   uploads: (platform?: Platform, accountId?: string) => {
@@ -59,13 +99,33 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload)
     }),
-    
+
   deleteUpload: (id: string) =>
     request<void>(`/api/uploads/${id}`, {
       method: "DELETE"
     }),
 
-  folderConnections: () => request<FolderConnection[]>("/api/folder-connections"),
+  storageConnections: () => request<StorageConnection[]>("/api/storage-connections"),
+
+  createLocalDriveConnection: (payload: CreateLocalDriveStorageConnectionInput) =>
+    request<LocalDriveConnectionResponse>("/api/storage-connections/local-drive", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  createGoogleDriveConnection: (payload: CreateGoogleDriveStorageConnectionInput) =>
+    request<StorageConnection>("/api/storage-connections/google-drive", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+
+  syncStorageConnection: (connectionId: string) =>
+    request<LocalDriveConnectionResponse>(`/api/storage-connections/${connectionId}/sync`, {
+      method: "POST"
+    }),
+
+  deleteStorageConnection: (connectionId: string) =>
+    request<void>(`/api/storage-connections/${connectionId}`, { method: "DELETE" }),
 
   accounts: (platform?: Platform) => request<PlatformAccount[]>(`/api/accounts${platform ? `?platform=${platform}` : ""}`),
 
@@ -91,14 +151,18 @@ export const api = {
   deleteAccount: (accountId: string) =>
     request<void>(`/api/accounts/${accountId}`, { method: "DELETE" }),
 
-  connectFolder: (accountId: string, folderPath: string) =>
-    request<{ connection: FolderConnection; sync: { added: number; updated: number; removed: number } }>(
-      `/api/accounts/${accountId}/folder-connection`,
-      { method: "POST", body: JSON.stringify({ folderPath }) },
-    ),
+  users: () => request<UserProfile[]>("/api/users"),
 
-  disconnectFolder: (connectionId: string) =>
-    request<void>(`/api/folder-connections/${connectionId}`, { method: "DELETE" }),
+  createUser: (payload: CreateUserProfileInput) =>
+    request<UserProfile>("/api/users", { method: "POST", body: JSON.stringify(payload) }),
+
+  updateUser: (userId: string, payload: UpdateUserProfileInput) =>
+    request<UserProfile>(`/api/users/${userId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+
+  deactivateUser: (userId: string) =>
+    request<void>(`/api/users/${userId}`, { method: "DELETE" }),
+
+  activityLogs: (limit = 100) => request<ActivityLog[]>(`/api/activity-logs?limit=${limit}`),
     
   automationInput: () => request<AutomationInput>("/api/automation/input"),
   

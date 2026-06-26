@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { nanoid } from "nanoid";
@@ -7,6 +7,10 @@ import nodeCron from "node-cron";
 import pg, { type PoolClient } from "pg";
 import {
   type AutomationInput,
+  type ActivityLog,
+  type CreateGoogleDriveStorageConnectionInput,
+  type CreateLocalDriveStorageConnectionInput,
+  type CreateUserProfileInput,
   type DashboardSummary,
   type FolderConnection,
   type Platform,
@@ -14,10 +18,15 @@ import {
   type PlatformUpload,
   type PublishingSchedule,
   type SocialMediaSchedule,
+  type StorageConnection,
+  type StorageConnectionStatus,
   type UpdateUploadDetailsInput,
+  type UpdateUserProfileInput,
   type UploadStatus,
   type UpsertPlatformAccountInput,
   type UpsertPublishingScheduleInput,
+  type UserProfile,
+  type UserRole,
   platformHandles,
   platformLabels,
   platformSurfaces,
@@ -51,11 +60,22 @@ type StoredFileInput = {
   folderSource?: PlatformUpload["folderSource"];
 };
 
+type BootstrapUser = {
+  username: string;
+  fullName: string;
+  email: string;
+  role: UserRole;
+  password: string;
+};
+
 export type AutomationInputMode = "ready" | "scheduledOnly";
 export type PublishingAccount = PlatformAccount & { password?: string };
 export type AutomationRunTrigger = "manual" | "scheduler";
 export type AutomationRunStatus = "running" | "completed" | "failed";
 export type AutomationPostStatus = "processing" | "posted" | "failed";
+
+const passwordIterations = 120_000;
+const passwordAlgorithm = "pbkdf2_sha256";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const localSecretKeyFile = resolveFromRoot(process.env.LOCAL_ACCOUNT_KEY_FILE ?? "./data/account-secret.key");
@@ -70,6 +90,73 @@ function resolveFromRoot(candidate: string) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function normalizeUsername(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function normalizeEmail(value: string | undefined, username: string) {
+  const trimmed = value?.trim();
+  if (trimmed) return trimmed.toLowerCase();
+  const localPart = normalizeUsername(username).replace(/[^a-z0-9._-]+/g, ".").replace(/^\.+|\.+$/g, "") || "user";
+  return `${localPart}@local.tinitiate`;
+}
+
+function hashPassword(password: string) {
+  const salt = randomBytes(16).toString("base64url");
+  const hash = pbkdf2Sync(password, salt, passwordIterations, 32, "sha256").toString("base64url");
+  return `${passwordAlgorithm}$${passwordIterations}$${salt}$${hash}`;
+}
+
+function verifyPassword(password: string, passwordHash?: string | null) {
+  if (!passwordHash) return false;
+  const [algorithm, iterationText, salt, expectedHash] = passwordHash.split("$");
+  if (algorithm !== passwordAlgorithm || !salt || !expectedHash) return false;
+  const iterations = Number(iterationText);
+  if (!Number.isInteger(iterations) || iterations < 10_000) return false;
+  try {
+    const expected = Buffer.from(expectedHash, "base64url");
+    const actual = pbkdf2Sync(password, salt, iterations, expected.length, "sha256");
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
+}
+
+function configuredBootstrapUsers(): BootstrapUser[] {
+  const users: BootstrapUser[] = [
+    {
+      username: process.env.OPERATIONS_MANAGER_USERNAME?.trim() || "operations.manager",
+      fullName: process.env.OPERATIONS_MANAGER_NAME?.trim() || "Operations Manager",
+      email: normalizeEmail(process.env.OPERATIONS_MANAGER_EMAIL, process.env.OPERATIONS_MANAGER_USERNAME?.trim() || "operations.manager"),
+      role: "operations_manager",
+      password: process.env.OPERATIONS_MANAGER_PASSWORD?.trim() || "Tinitiate@2026"
+    },
+    {
+      username: process.env.POST_UPLOADER_USERNAME?.trim() || "content.uploader",
+      fullName: process.env.POST_UPLOADER_NAME?.trim() || "Content Uploader",
+      email: normalizeEmail(process.env.POST_UPLOADER_EMAIL, process.env.POST_UPLOADER_USERNAME?.trim() || "content.uploader"),
+      role: "post_uploader",
+      password: process.env.POST_UPLOADER_PASSWORD?.trim() || "Uploader@2026"
+    },
+    {
+      username: process.env.SCHEDULER_USERNAME?.trim() || "post.scheduler",
+      fullName: process.env.SCHEDULER_NAME?.trim() || "Post Scheduler",
+      email: normalizeEmail(process.env.SCHEDULER_EMAIL, process.env.SCHEDULER_USERNAME?.trim() || "post.scheduler"),
+      role: "scheduler",
+      password: process.env.SCHEDULER_PASSWORD?.trim() || "Scheduler@2026"
+    },
+    {
+      username: process.env.VIEWER_USERNAME?.trim() || "workspace.viewer",
+      fullName: process.env.VIEWER_NAME?.trim() || "Workspace Viewer",
+      email: normalizeEmail(process.env.VIEWER_EMAIL, process.env.VIEWER_USERNAME?.trim() || "workspace.viewer"),
+      role: "viewer",
+      password: process.env.VIEWER_PASSWORD?.trim() || "Viewer@2026"
+    }
+  ];
+
+  return users.map(user => ({ ...user, username: normalizeUsername(user.username), email: normalizeEmail(user.email, user.username) }));
 }
 
 async function getLocalSecretKey() {
@@ -186,6 +273,39 @@ function asUploadStatus(value: unknown): UploadStatus {
   return value as UploadStatus;
 }
 
+function asUserRole(value: unknown): UserRole {
+  return value as UserRole;
+}
+
+function userFromRow(row: any): UserProfile {
+  return {
+    id: row.id,
+    username: row.username,
+    fullName: row.full_name,
+    email: normalizeOptionalString(row.email),
+    role: asUserRole(row.role),
+    isActive: Boolean(row.is_active),
+    createdAt: isoString(row.created_at) ?? nowIso(),
+    updatedAt: isoString(row.updated_at) ?? nowIso(),
+    lastLoginAt: isoString(row.last_login_at)
+  };
+}
+
+function activityLogFromRow(row: any): ActivityLog {
+  return {
+    id: row.id,
+    actorUserId: normalizeOptionalString(row.actor_user_profile_id),
+    actorName: normalizeOptionalString(row.actor_full_name),
+    actorUsername: normalizeOptionalString(row.actor_username),
+    action: row.action,
+    entityType: row.entity_type,
+    entityId: normalizeOptionalString(row.entity_id),
+    summary: row.summary,
+    metadata: row.metadata ?? {},
+    createdAt: isoString(row.created_at) ?? nowIso()
+  };
+}
+
 function accountFromRow(row: any): PlatformAccount {
   return {
     id: row.id,
@@ -229,6 +349,28 @@ function folderConnectionFromRow(row: any): FolderConnection {
   };
 }
 
+function storageConnectionFromRow(row: any): StorageConnection {
+  return {
+    id: row.id,
+    storageType: row.storage_type,
+    displayName: row.display_name,
+    platform: asPlatform(row.platform_name),
+    accountId: row.publishing_account_id,
+    connectedByUserId: normalizeOptionalString(row.connected_by_user_profile_id),
+    localFolderPath: normalizeOptionalString(row.local_folder_path),
+    googleDriveFolderId: normalizeOptionalString(row.google_drive_folder_id),
+    googleDriveFolderUrl: normalizeOptionalString(row.google_drive_folder_url),
+    googleDriveFolderName: normalizeOptionalString(row.google_drive_folder_name),
+    legacyConnectedFolderId: normalizeOptionalString(row.legacy_connected_folder_id),
+    status: row.connection_status as StorageConnectionStatus,
+    active: Boolean(row.is_active),
+    lastSyncedAt: isoString(row.last_synced_at),
+    lastError: normalizeOptionalString(row.last_error),
+    createdAt: isoString(row.created_at) ?? nowIso(),
+    updatedAt: isoString(row.updated_at) ?? nowIso()
+  };
+}
+
 function uploadFromRow(row: any): PlatformUpload {
   const platform = asPlatform(row.platform_name);
   const accountId = row.publishing_account_id;
@@ -260,6 +402,9 @@ function uploadFromRow(row: any): PlatformUpload {
     updatedAt: isoString(row.updated_at) ?? nowIso(),
     scheduledAt: isoString(row.scheduled_publish_at),
     scheduleId: row.schedule_template_id === null || row.schedule_template_id === undefined ? undefined : Number(row.schedule_template_id),
+    createdByUserId: normalizeOptionalString(row.created_by_user_profile_id),
+    scheduledByUserId: normalizeOptionalString(row.scheduled_by_user_profile_id),
+    lastUpdatedByUserId: normalizeOptionalString(row.last_updated_by_user_profile_id),
     folderSource,
     automation: createAutomation(platform, accountId, row.id, url)
   };
@@ -732,12 +877,391 @@ async function mutateStore<T>(mutator: (store: Store) => T | Promise<T>) {
   return operation;
 }
 
+async function setPostActors(
+  postId: string,
+  actors: {
+    createdByUserId?: string;
+    scheduledByUserId?: string;
+    lastUpdatedByUserId?: string;
+  },
+) {
+  await db.query(`
+    update posts
+    set
+      created_by_user_profile_id = coalesce($2, created_by_user_profile_id),
+      scheduled_by_user_profile_id = coalesce($3, scheduled_by_user_profile_id),
+      last_updated_by_user_profile_id = coalesce($4, last_updated_by_user_profile_id)
+    where id = $1
+  `, [
+    postId,
+    actors.createdByUserId ?? null,
+    actors.scheduledByUserId ?? null,
+    actors.lastUpdatedByUserId ?? null
+  ]);
+}
+
+export async function logActivity(
+  actorUserId: string | null | undefined,
+  action: string,
+  entityType: string,
+  entityId: string | number | null | undefined,
+  summary: string,
+  metadata: Record<string, unknown> = {},
+) {
+  const result = await db.query(`
+    insert into activity_logs (
+      actor_user_profile_id,
+      action,
+      entity_type,
+      entity_id,
+      summary,
+      metadata
+    )
+    values ($1, $2, $3, $4, $5, $6)
+    returning *
+  `, [
+    actorUserId ?? null,
+    action,
+    entityType,
+    entityId === null || entityId === undefined ? null : String(entityId),
+    summary,
+    JSON.stringify(metadata)
+  ]);
+
+  return activityLogFromRow(result.rows[0]);
+}
+
+async function ensureBootstrapUsers() {
+  const activeManagerCount = await db.query<{ count: string }>(`
+    select count(*)::text as count
+    from user_profiles
+    where role = 'operations_manager'::app_user_role and is_active = true
+  `);
+
+  const needsBootstrap = Number(activeManagerCount.rows[0]?.count ?? 0) === 0;
+  if (!needsBootstrap) return;
+
+  for (const user of configuredBootstrapUsers()) {
+    const existing = await db.query("select * from user_profiles where lower(username) = lower($1)", [user.username]);
+    if (existing.rows[0]) {
+      await db.query(`
+        update user_profiles
+        set
+          full_name = $2,
+          email = $3,
+          role = $4::app_user_role,
+          is_active = true,
+          password_hash = coalesce(password_hash, $5)
+        where id = $1
+      `, [existing.rows[0].id, user.fullName, user.email, user.role, hashPassword(user.password)]);
+      continue;
+    }
+
+    await db.query(`
+      insert into user_profiles (
+        username,
+        full_name,
+        email,
+        role,
+        is_active,
+        password_hash
+      )
+      values ($1, $2, $3, $4::app_user_role, true, $5)
+    `, [
+      user.username,
+      user.fullName,
+      user.email,
+      user.role,
+      hashPassword(user.password)
+    ]);
+  }
+}
+
+async function assertCanChangeManager(existingUserId: string, existingRole: UserRole, nextRole: UserRole, nextActive: boolean) {
+  if (existingRole !== "operations_manager") return;
+  if (nextRole === "operations_manager" && nextActive) return;
+
+  const result = await db.query<{ count: string }>(`
+    select count(*)::text as count
+    from user_profiles
+    where id <> $1
+      and role = 'operations_manager'::app_user_role
+      and is_active = true
+  `, [existingUserId]);
+
+  if (Number(result.rows[0]?.count ?? 0) === 0) {
+    throw new Error("At least one active operations manager must remain.");
+  }
+}
+
+export async function listUserProfiles() {
+  await ensureBootstrapUsers();
+  const result = await db.query("select * from user_profiles order by created_at desc");
+  return result.rows.map(userFromRow);
+}
+
+export async function getUserProfile(userId: string) {
+  await ensureBootstrapUsers();
+  const result = await db.query("select * from user_profiles where id = $1", [userId]);
+  return result.rows[0] ? userFromRow(result.rows[0]) : null;
+}
+
+export async function loginUser(username: string, password: string) {
+  await ensureBootstrapUsers();
+  const result = await db.query("select * from user_profiles where lower(username) = lower($1) and is_active = true", [username.trim()]);
+  const row = result.rows[0];
+  if (!row || !verifyPassword(password, row.password_hash)) return null;
+
+  const updated = await db.query(`
+    update user_profiles
+    set last_login_at = now()
+    where id = $1
+    returning *
+  `, [row.id]);
+
+  const user = userFromRow(updated.rows[0]);
+  await logActivity(user.id, "auth.login", "user_profile", user.id, `${user.fullName} signed in.`, { role: user.role });
+  return user;
+}
+
+export async function createUserProfile(input: CreateUserProfileInput, actorUserId?: string) {
+  await ensureBootstrapUsers();
+  const username = normalizeUsername(input.username);
+  const email = normalizeEmail(input.email, username);
+  const result = await db.query(`
+    insert into user_profiles (
+      username,
+      full_name,
+      email,
+      role,
+      is_active,
+      password_hash
+    )
+    values ($1, $2, $3, $4::app_user_role, $5, $6)
+    returning *
+  `, [
+    username,
+    input.fullName.trim(),
+    email,
+    input.role,
+    input.isActive ?? true,
+    hashPassword(input.password)
+  ]);
+
+  const user = userFromRow(result.rows[0]);
+  await logActivity(actorUserId, "user.created", "user_profile", user.id, `${user.fullName} was added as ${user.role}.`, { username: user.username, role: user.role });
+  return user;
+}
+
+export async function updateUserProfile(userId: string, input: UpdateUserProfileInput, actorUserId?: string) {
+  await ensureBootstrapUsers();
+  const existingResult = await db.query("select * from user_profiles where id = $1", [userId]);
+  const existing = existingResult.rows[0];
+  if (!existing) return null;
+
+  const nextUsername = input.username === undefined ? existing.username : normalizeUsername(input.username);
+  const nextRole = (input.role ?? existing.role) as UserRole;
+  const nextActive = input.isActive ?? Boolean(existing.is_active);
+  await assertCanChangeManager(userId, asUserRole(existing.role), nextRole, nextActive);
+
+  const result = await db.query(`
+    update user_profiles
+    set
+      username = $2,
+      full_name = $3,
+      email = $4,
+      role = $5::app_user_role,
+      is_active = $6,
+      password_hash = coalesce($7, password_hash)
+    where id = $1
+    returning *
+  `, [
+    userId,
+    nextUsername,
+    input.fullName?.trim() ?? existing.full_name,
+    input.email === undefined ? existing.email : normalizeEmail(input.email, nextUsername),
+    nextRole,
+    nextActive,
+    input.password ? hashPassword(input.password) : null
+  ]);
+
+  const user = userFromRow(result.rows[0]);
+  await logActivity(actorUserId, "user.updated", "user_profile", user.id, `${user.fullName} profile was updated.`, { username: user.username, role: user.role, isActive: user.isActive });
+  return user;
+}
+
+export async function deactivateUserProfile(userId: string, actorUserId?: string) {
+  return updateUserProfile(userId, { isActive: false }, actorUserId);
+}
+
+export async function listActivityLogs(limit = 100) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 250);
+  const result = await db.query(`
+    select
+      activity_logs.*,
+      user_profiles.full_name as actor_full_name,
+      user_profiles.username as actor_username
+    from activity_logs
+    left join user_profiles on user_profiles.id = activity_logs.actor_user_profile_id
+    order by activity_logs.created_at desc
+    limit $1
+  `, [safeLimit]);
+
+  return result.rows.map(activityLogFromRow);
+}
+
+export async function listStorageConnections() {
+  const result = await db.query(`
+    select *
+    from storage_connections
+    order by created_at desc
+  `);
+  return result.rows.map(storageConnectionFromRow);
+}
+
+export async function getStorageConnection(storageConnectionId: string) {
+  const result = await db.query("select * from storage_connections where id = $1", [storageConnectionId]);
+  return result.rows[0] ? storageConnectionFromRow(result.rows[0]) : null;
+}
+
+export async function upsertLocalDriveStorageConnection(
+  folderConnection: FolderConnection,
+  input: Pick<CreateLocalDriveStorageConnectionInput, "displayName"> = {},
+  actorUserId?: string,
+) {
+  const displayName = input.displayName?.trim() || `${platformLabels[folderConnection.platform]} local drive`;
+  const id = `storage_${nanoid(12)}`;
+  const result = await db.query(`
+    insert into storage_connections (
+      id,
+      storage_type,
+      display_name,
+      publishing_account_id,
+      platform_name,
+      connected_by_user_profile_id,
+      local_folder_path,
+      legacy_connected_folder_id,
+      connection_status,
+      is_active,
+      last_synced_at,
+      last_error,
+      created_at,
+      updated_at
+    )
+    values ($1, 'local_drive', $2, $3, $4::app_platform_name, $5, $6, $7, $8::app_storage_connection_status, true, $9, $10, $11, $12)
+    on conflict (legacy_connected_folder_id) where (legacy_connected_folder_id is not null) do update set
+      display_name = excluded.display_name,
+      publishing_account_id = excluded.publishing_account_id,
+      platform_name = excluded.platform_name,
+      connected_by_user_profile_id = coalesce(excluded.connected_by_user_profile_id, storage_connections.connected_by_user_profile_id),
+      local_folder_path = excluded.local_folder_path,
+      connection_status = excluded.connection_status,
+      is_active = true,
+      last_synced_at = excluded.last_synced_at,
+      last_error = excluded.last_error
+    returning *
+  `, [
+    id,
+    displayName,
+    folderConnection.accountId,
+    folderConnection.platform,
+    actorUserId ?? null,
+    folderConnection.folderPath,
+    folderConnection.id,
+    folderConnection.lastError ? "error" : "connected",
+    folderConnection.lastScannedAt ?? null,
+    folderConnection.lastError ?? null,
+    folderConnection.createdAt,
+    folderConnection.updatedAt
+  ]);
+
+  return storageConnectionFromRow(result.rows[0]);
+}
+
+function driveFolderIdFromInput(input: CreateGoogleDriveStorageConnectionInput) {
+  if (input.googleDriveFolderId?.trim()) return input.googleDriveFolderId.trim();
+  const url = input.googleDriveFolderUrl?.trim();
+  if (!url) return undefined;
+  const foldersMatch = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (foldersMatch?.[1]) return foldersMatch[1];
+  const id = new URL(url).searchParams.get("id");
+  return id ?? undefined;
+}
+
+export async function createGoogleDriveStorageConnection(input: CreateGoogleDriveStorageConnectionInput, actorUserId?: string) {
+  const account = await getPlatformAccount(input.accountId);
+  if (!account) throw new Error("Publishing account not found.");
+  if (!account.enabled) throw new Error("Choose an enabled publishing account.");
+  const folderId = driveFolderIdFromInput(input);
+  if (!folderId && !input.googleDriveFolderUrl?.trim()) throw new Error("Google Drive folder id or URL is required.");
+  const timestamp = nowIso();
+  const result = await db.query(`
+    insert into storage_connections (
+      id,
+      storage_type,
+      display_name,
+      publishing_account_id,
+      platform_name,
+      connected_by_user_profile_id,
+      google_drive_folder_id,
+      google_drive_folder_url,
+      google_drive_folder_name,
+      connection_status,
+      is_active,
+      created_at,
+      updated_at
+    )
+    values ($1, 'google_drive', $2, $3, $4::app_platform_name, $5, $6, $7, $8, 'pending_auth', true, $9, $9)
+    returning *
+  `, [
+    `storage_${nanoid(12)}`,
+    input.displayName.trim(),
+    account.id,
+    account.platform,
+    actorUserId ?? null,
+    folderId ?? null,
+    input.googleDriveFolderUrl?.trim() || null,
+    input.googleDriveFolderName?.trim() || null,
+    timestamp
+  ]);
+
+  return storageConnectionFromRow(result.rows[0]);
+}
+
+export async function updateStorageConnectionSyncState(
+  storageConnectionId: string,
+  status: StorageConnectionStatus,
+  lastError?: string | null,
+) {
+  const result = await db.query(`
+    update storage_connections
+    set
+      connection_status = $2::app_storage_connection_status,
+      last_synced_at = case when $2 = 'connected' then now() else last_synced_at end,
+      last_error = $3
+    where id = $1
+    returning *
+  `, [storageConnectionId, status, lastError ?? null]);
+
+  return result.rows[0] ? storageConnectionFromRow(result.rows[0]) : null;
+}
+
+export async function deleteStorageConnection(storageConnectionId: string) {
+  const result = await db.query(`
+    delete from storage_connections
+    where id = $1
+    returning *
+  `, [storageConnectionId]);
+  return result.rows[0] ? storageConnectionFromRow(result.rows[0]) : null;
+}
+
 async function insertPostStatusHistory(
   postId: string,
   oldStatus: UploadStatus | null,
   newStatus: UploadStatus,
   changeReason: string,
   changedAt = nowIso(),
+  actorUserId?: string,
 ) {
   await db.query(`
     insert into post_status_history (
@@ -745,23 +1269,25 @@ async function insertPostStatusHistory(
       old_status,
       new_status,
       change_reason,
+      changed_by_user_profile_id,
       changed_at
     )
-    values ($1, $2, $3, $4, $5)
-  `, [postId, oldStatus, newStatus, changeReason, changedAt]);
+    values ($1, $2, $3, $4, $5, $6)
+  `, [postId, oldStatus, newStatus, changeReason, actorUserId ?? null, changedAt]);
 }
 
-export async function createAutomationRun(trigger: AutomationRunTrigger) {
+export async function createAutomationRun(trigger: AutomationRunTrigger, startedByUserId?: string) {
   const result = await db.query<{ id: string }>(`
     insert into automation_runs (
+      started_by_user_profile_id,
       run_trigger,
       run_status,
       started_at,
       created_at
     )
-    values ($1, 'running', now(), now())
+    values ($1, $2, 'running', now(), now())
     returning id
-  `, [trigger]);
+  `, [startedByUserId ?? null, trigger]);
 
   return result.rows[0].id;
 }
@@ -1183,7 +1709,7 @@ export async function listUploads(platform?: Platform, accountId?: string) {
     .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
 }
 
-export async function createUpload(accountId: string, file: StoredFileInput) {
+export async function createUpload(accountId: string, file: StoredFileInput, actorUserId?: string) {
   const upload = await mutateStore(store => {
     const account = store.accounts.find(item => item.id === accountId);
     if (!account) throw new Error("Publishing account not found.");
@@ -1208,6 +1734,9 @@ export async function createUpload(accountId: string, file: StoredFileInput) {
       updatedAt: timestamp,
       scheduledAt: file.scheduledAt || undefined,
       scheduleId: file.scheduleId,
+      createdByUserId: actorUserId,
+      scheduledByUserId: file.scheduledAt || file.scheduleId ? actorUserId : undefined,
+      lastUpdatedByUserId: actorUserId,
       folderSource: file.folderSource,
       automation: createAutomation(account.platform, accountId, id, file.url)
     };
@@ -1215,11 +1744,16 @@ export async function createUpload(accountId: string, file: StoredFileInput) {
     return upload;
   });
 
-  await insertPostStatusHistory(upload.id, null, "queued", "Post created", upload.uploadedAt);
+  await setPostActors(upload.id, {
+    createdByUserId: actorUserId,
+    scheduledByUserId: file.scheduledAt || file.scheduleId ? actorUserId : undefined,
+    lastUpdatedByUserId: actorUserId
+  });
+  await insertPostStatusHistory(upload.id, null, "queued", "Post created", upload.uploadedAt, actorUserId);
   return upload;
 }
 
-export async function updateUploadStatus(uploadId: string, status: UploadStatus, changeReason = "Post status updated") {
+export async function updateUploadStatus(uploadId: string, status: UploadStatus, changeReason = "Post status updated", actorUserId?: string) {
   let oldStatus: UploadStatus | null = null;
   let statusChanged = false;
   const changedAt = nowIso();
@@ -1235,7 +1769,7 @@ export async function updateUploadStatus(uploadId: string, status: UploadStatus,
   });
 
   if (updated && statusChanged) {
-    await insertPostStatusHistory(uploadId, oldStatus, status, changeReason, changedAt);
+    await insertPostStatusHistory(uploadId, oldStatus, status, changeReason, changedAt, actorUserId);
   }
 
   return updated;
@@ -1250,11 +1784,12 @@ export async function deleteUpload(uploadId: string) {
   });
 }
 
-export async function updateUploadDetails(uploadId: string, input: UpdateUploadDetailsInput) {
+export async function updateUploadDetails(uploadId: string, input: UpdateUploadDetailsInput, actorUserId?: string) {
   const selectedScheduleId = input.scheduleId === null ? undefined : normalizeScheduleId(input.scheduleId);
   let oldStatus: UploadStatus | null = null;
   let statusChanged = false;
   const changedAt = nowIso();
+  const scheduleTouched = input.scheduledAt !== undefined || input.scheduleId !== undefined;
 
   const updatedUpload = await mutateStore(store => {
     const index = store.uploads.findIndex(upload => upload.id === uploadId);
@@ -1283,6 +1818,8 @@ export async function updateUploadDetails(uploadId: string, input: UpdateUploadD
       caption: input.caption.trim(),
       scheduledAt: nextScheduledAt,
       scheduleId: nextScheduleId,
+      scheduledByUserId: scheduleTouched ? actorUserId : existing.scheduledByUserId,
+      lastUpdatedByUserId: actorUserId,
       status: "queued",
       updatedAt: changedAt,
       automation: createAutomation(existing.platform, accountId, existing.id, existing.url)
@@ -1292,7 +1829,14 @@ export async function updateUploadDetails(uploadId: string, input: UpdateUploadD
   });
 
   if (updatedUpload && statusChanged) {
-    await insertPostStatusHistory(uploadId, oldStatus, "queued", "Post details updated and requeued", changedAt);
+    await insertPostStatusHistory(uploadId, oldStatus, "queued", "Post details updated and requeued", changedAt, actorUserId);
+  }
+
+  if (updatedUpload) {
+    await setPostActors(uploadId, {
+      scheduledByUserId: scheduleTouched ? actorUserId : undefined,
+      lastUpdatedByUserId: actorUserId
+    });
   }
 
   return updatedUpload;

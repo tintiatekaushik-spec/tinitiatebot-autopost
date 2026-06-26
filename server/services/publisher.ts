@@ -498,6 +498,7 @@ async function prepareScheduledAccountSessions() {
 type RunAutomationOptions = {
   mode?: AutomationInputMode;
   trigger?: AutomationRunTrigger;
+  startedByUserId?: string;
 };
 
 let activeAutomationRun: Promise<void> | null = null;
@@ -506,7 +507,7 @@ export function isAutomationRunning() {
   return activeAutomationRun !== null;
 }
 
-async function runAutomationOnce({ mode = "ready", trigger = "manual" }: RunAutomationOptions) {
+async function runAutomationOnce({ mode = "ready", trigger = "manual", startedByUserId }: RunAutomationOptions) {
   console.log(`Starting publisher automation (${trigger})...`);
   if (trigger === "manual") await prepareScheduledAccountSessions();
   const { channels } = await automationInput(undefined, mode);
@@ -516,7 +517,7 @@ async function runAutomationOnce({ mode = "ready", trigger = "manual" }: RunAuto
     return;
   }
 
-  const automationRunId = await createAutomationRun(trigger);
+  const automationRunId = await createAutomationRun(trigger, startedByUserId);
   let hadRunFailure = false;
   let runErrorMessage: string | undefined;
   const queues = new Map<string, PlatformUpload[]>();
