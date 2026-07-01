@@ -507,10 +507,8 @@ async function fillGoogleLoginForm(page: Page, email: string, password: string) 
 }
 
 export async function loginToYouTube(page: Page, accountLogin?: AccountLogin) {
-  const email = accountLogin?.identifier?.trim() || process.env.YOUTUBE_EMAIL?.trim();
-  const password = accountLogin?.password?.trim() || process.env.YOUTUBE_PASSWORD?.trim();
   const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
-  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
+  const manualLoginOnly = !savedSessionOnly;
 
   console.log("Navigating to YouTube upload page...");
   await page.goto(YOUTUBE_UPLOAD_URL, { timeout: 60000 });
@@ -521,17 +519,10 @@ export async function loginToYouTube(page: Page, accountLogin?: AccountLogin) {
   if (await isYouTubeLoggedIn(page)) {
     console.log("YouTube session already active.");
   } else if (savedSessionOnly) {
-    throw new Error("YouTube saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
-  } else if (manualLoginOnly) {
+    throw new Error("YouTube saved browser session is not active. Open this account's Login action and complete login before the scheduled publish time.");
+  } else {
     console.log("Complete the full YouTube login manually in Chrome; bot will save the session after the account opens.");
     await waitForYouTubeLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
-  } else if (email && password) {
-    console.log("YouTube session is not active. Trying automatic login...");
-    await fillGoogleLoginForm(page, email, password);
-    await waitForYouTubeLoginResult(page, true);
-  } else {
-    console.log("YouTube credentials are not configured. Complete login manually in Chrome...");
-    await waitForYouTubeLoginResult(page, true);
   }
 
   if (!await isYouTubeLoggedIn(page)) {

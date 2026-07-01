@@ -1,0 +1,72 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tinitiate-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "54322:5432"
+    volumes:
+      - tinitiate_pgdata:/var/lib/postgresql/data
+      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      target: api
+    container_name: tinitiate-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4100
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/postgres
+      SUPABASE_DATABASE_URL: postgresql://postgres:postgres@db:5432/postgres
+      UPLOAD_DIR: /app/uploads
+      CHROME_PATH: /usr/bin/google-chrome
+      OPERATIONS_MANAGER_USERNAME: ${OPERATIONS_MANAGER_USERNAME:-operations.manager}
+      OPERATIONS_MANAGER_PASSWORD: ${OPERATIONS_MANAGER_PASSWORD:-Tinitiate@2026}
+      POST_UPLOADER_USERNAME: ${POST_UPLOADER_USERNAME:-content.uploader}
+      POST_UPLOADER_PASSWORD: ${POST_UPLOADER_PASSWORD:-Uploader@2026}
+      SCHEDULER_USERNAME: ${SCHEDULER_USERNAME:-post.scheduler}
+      SCHEDULER_PASSWORD: ${SCHEDULER_PASSWORD:-Scheduler@2026}
+      VIEWER_USERNAME: ${VIEWER_USERNAME:-workspace.viewer}
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:-Viewer@2026}
+      LOCAL_ACCOUNT_SECRET_KEY: ${LOCAL_ACCOUNT_SECRET_KEY:-change-this-local-secret-key-before-production}
+      SCHEDULER_CRON: ${SCHEDULER_CRON:-* * * * *}
+    ports:
+      - "4100:4100"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./browser-data:/app/browser-data
+      - ./storage-sources:/storage-sources
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build:
+      context: .
+      target: web
+    container_name: tinitiate-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "5173:80"
+
+volumes:
+  tinitiate_pgdata:

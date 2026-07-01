@@ -250,7 +250,6 @@ type AccountLoginOptions = {
 function accountLogin(account: PublishingAccount, options: AccountLoginOptions = {}): AccountLogin {
   return {
     identifier: account.loginIdentifier === "Existing browser session" ? undefined : account.loginIdentifier,
-    password: account.password,
     confirmation: account.loginConfirmation,
     useSavedSessionOnly: options.useSavedSessionOnly,
     forceManualLogin: options.forceManualLogin,
@@ -280,37 +279,6 @@ async function loginOnly(page: Page, account: PublishingAccount, options: Accoun
   }
 }
 
-async function verifySavedSession(account: PublishingAccount) {
-  console.log(`Verifying saved session for ${account.platform} account ${account.handle}.`);
-  const browser = await launchAccountBrowser(account);
-
-  try {
-    const page = browser.pages()[0] ?? await browser.newPage();
-    await loginOnly(page, account, { useSavedSessionOnly: true });
-    await saveAccountSessionState(account, browser);
-    console.log(`Verified saved session for ${account.platform} account ${account.handle}.`);
-  } finally {
-    await browser.close();
-  }
-}
-
-function xAutomaticLoginConfigured(account: PublishingAccount) {
-  if (process.env.X_AUTO_LOGIN === "false") return false;
-
-  const envIdentifier = (
-    process.env.X_EMAIL ??
-    process.env.TWITTER_EMAIL ??
-    process.env.X_USERNAME ??
-    process.env.TWITTER_USERNAME ??
-    process.env.X_PHONE ??
-    process.env.TWITTER_PHONE
-  )?.trim();
-  const accountIdentifier = account.loginIdentifier === "Existing browser session" ? undefined : account.loginIdentifier?.trim();
-  const password = account.password?.trim() || (process.env.X_PASSWORD ?? process.env.TWITTER_PASSWORD)?.trim();
-
-  return Boolean((accountIdentifier || envIdentifier) && password);
-}
-
 async function prepareXAccountSession(account: PublishingAccount) {
   console.log(`Checking saved X session for ${account.handle} (${account.id}).`);
 
@@ -327,29 +295,8 @@ async function prepareXAccountSession(account: PublishingAccount) {
     await browser.close().catch(() => undefined);
   }
 
-  if (xAutomaticLoginConfigured(account)) {
-    browser = await launchAccountBrowser(account);
-    try {
-      const page = browser.pages()[0] ?? await browser.newPage();
-      await loginOnly(page, account);
-      await saveAccountSessionState(account, browser);
-      console.log(`X automatic login saved the session for ${account.handle}.`);
-      await browser.close().catch(() => undefined);
-      await verifySavedSession(account);
-      return;
-    } catch (error) {
-      console.warn(
-        `Automatic X login failed for ${account.handle}: ${errorMessage(error)}. Opening normal Chrome for manual login.`,
-      );
-    } finally {
-      await browser.close().catch(() => undefined);
-    }
-  } else {
-    console.log(`X automatic login is not configured for ${account.handle}. Opening normal Chrome for manual login.`);
-  }
-
+  console.log(`Opening normal Chrome for manual X login for ${account.handle}.`);
   await prepareXSessionInNormalChrome(account);
-  await verifySavedSession(account);
 }
 
 function getFailureHoldMs() {
@@ -444,13 +391,14 @@ async function prepareAccountSession(account: PublishingAccount) {
   let browser = await launchAccountBrowser(account);
   try {
     const page = browser.pages()[0] ?? await browser.newPage();
-    await loginOnly(page, account);
+    await loginOnly(page, account, { useSavedSessionOnly: true });
     await saveAccountSessionState(account, browser);
     console.log(`Session ready for ${account.platform} account ${account.handle}.`);
+    return;
   } catch (error) {
     const message = errorMessage(error);
     console.warn(
-      `Automatic session preparation failed for ${account.platform} account ${account.handle}: ${message}. Reopening a fresh browser for manual login.`,
+      `Saved session is not active for ${account.platform} account ${account.handle}: ${message}. Opening Chrome for manual login.`,
     );
     await browser.close().catch(() => undefined);
 
@@ -462,8 +410,49 @@ async function prepareAccountSession(account: PublishingAccount) {
   } finally {
     await browser.close();
   }
+}
 
-  await verifySavedSession(account);
+async function prepareManualAccountSession(account: PublishingAccount) {
+  if (account.platform === "x") {
+    await prepareXSessionInNormalChrome(account);
+    return;
+  }
+
+  console.log(`Opening ${account.platform} login page for ${account.handle} (${account.id}).`);
+  const browser = await launchAccountBrowser(account);
+  try {
+    const page = browser.pages()[0] ?? await browser.newPage();
+    await loginOnly(page, account, { forceManualLogin: true, ignoreLoginErrors: true });
+    await saveAccountSessionState(account, browser);
+    console.log(`Manual session saved for ${account.platform} account ${account.handle}.`);
+  } finally {
+    await browser.close();
+  }
+}
+
+const activeSessionPreparations = new Map<string, Promise<void>>();
+
+export async function startManualAccountSession(accountId: string) {
+  const existing = activeSessionPreparations.get(accountId);
+  const account = await getPublishingAccount(accountId);
+  if (!account) throw new Error("Publishing account not found.");
+  if (!account.enabled) throw new Error("Publishing account is disabled.");
+
+  if (existing) return { account, started: false };
+
+  const operation = prepareManualAccountSession(account)
+    .catch(error => {
+      console.error(
+        `Manual session preparation failed for ${account.platform} account ${account.handle}:`,
+        errorMessage(error),
+      );
+    })
+    .finally(() => {
+      activeSessionPreparations.delete(account.id);
+    });
+
+  activeSessionPreparations.set(account.id, operation);
+  return { account, started: true };
 }
 
 async function prepareScheduledAccountSessions() {
@@ -509,7 +498,6 @@ export function isAutomationRunning() {
 
 async function runAutomationOnce({ mode = "ready", trigger = "manual", startedByUserId }: RunAutomationOptions) {
   console.log(`Starting publisher automation (${trigger})...`);
-  if (trigger === "manual") await prepareScheduledAccountSessions();
   const { channels } = await automationInput(undefined, mode);
   const uploads = Object.values(channels).flat();
   if (uploads.length === 0) {
@@ -539,7 +527,7 @@ async function runAutomationOnce({ mode = "ready", trigger = "manual", startedBy
 
       try {
         const accountHadFailure = await runAccountQueue(automationRunId, trigger, account, accountUploads, {
-          useSavedSessionOnly: trigger === "scheduler",
+          useSavedSessionOnly: true,
         });
         if (accountHadFailure) {
           hadRunFailure = true;

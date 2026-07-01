@@ -69,7 +69,7 @@ type BootstrapUser = {
 };
 
 export type AutomationInputMode = "ready" | "scheduledOnly";
-export type PublishingAccount = PlatformAccount & { password?: string };
+export type PublishingAccount = PlatformAccount;
 export type AutomationRunTrigger = "manual" | "scheduler";
 export type AutomationRunStatus = "running" | "completed" | "failed";
 export type AutomationPostStatus = "processing" | "posted" | "failed";
@@ -314,7 +314,7 @@ function accountFromRow(row: any): PlatformAccount {
     handle: row.account_handle,
     loginIdentifier: row.login_username,
     loginConfirmation: normalizeOptionalString(row.login_note),
-    credentialConfigured: Boolean(row.has_saved_password),
+    credentialConfigured: false,
     enabled: Boolean(row.is_enabled),
     createdAt: isoString(row.created_at) ?? nowIso(),
     updatedAt: isoString(row.updated_at) ?? nowIso()
@@ -413,13 +413,11 @@ function uploadFromRow(row: any): PlatformUpload {
 async function readStore(): Promise<Store> {
   const [
     accountRows,
-    secretRows,
     scheduleRows,
     folderRows,
     uploadRows
   ] = await Promise.all([
     db.query("select * from publishing_accounts order by platform_name, account_name"),
-    db.query("select * from publishing_account_secrets"),
     db.query("select * from schedule_templates order by id"),
     db.query("select * from connected_folders order by platform_name, folder_path"),
     db.query(`
@@ -435,15 +433,10 @@ async function readStore(): Promise<Store> {
     `)
   ]);
 
-  const accountSecrets: Record<string, AccountSecret> = {};
-  for (const row of secretRows.rows) {
-    accountSecrets[row.publishing_account_id] = { encryptedPassword: row.encrypted_password };
-  }
-
   return {
     version: 3,
     accounts: accountRows.rows.map(accountFromRow),
-    accountSecrets,
+    accountSecrets: {},
     schedules: scheduleRows.rows.map(scheduleFromRow),
     socialMediaSchedules: [],
     uploads: uploadRows.rows.map(uploadFromRow),
@@ -1379,16 +1372,13 @@ export async function getPlatformAccount(accountId: string) {
 export async function getPublishingAccount(accountId: string): Promise<PublishingAccount | null> {
   const store = await readStore();
   const account = store.accounts.find(item => item.id === accountId);
-  if (!account) return null;
-  return { ...account, password: await decryptPassword(store.accountSecrets[accountId]) };
+  return account ?? null;
 }
 
 export async function createPlatformAccount(platform: Platform, input: UpsertPlatformAccountInput) {
-  const encryptedPassword = input.password ? await encryptPassword(input.password) : undefined;
   return mutateStore(store => {
     const duplicate = store.accounts.some(account => account.platform === platform && account.handle.toLowerCase() === input.handle.toLowerCase());
     if (duplicate) throw new Error(`${platformLabels[platform]} account ${input.handle} already exists.`);
-    if (!input.password) throw new Error("Password is required when adding an account.");
     const timestamp = nowIso();
     const account: PlatformAccount = {
       id: `account_${nanoid(12)}`,
@@ -1397,19 +1387,17 @@ export async function createPlatformAccount(platform: Platform, input: UpsertPla
       handle: input.handle,
       loginIdentifier: input.loginIdentifier,
       loginConfirmation: input.loginConfirmation || undefined,
-      credentialConfigured: true,
+      credentialConfigured: false,
       enabled: input.enabled ?? true,
       createdAt: timestamp,
       updatedAt: timestamp
     };
     store.accounts.push(account);
-    store.accountSecrets[account.id] = { encryptedPassword };
     return account;
   });
 }
 
 export async function updatePlatformAccount(accountId: string, input: UpsertPlatformAccountInput) {
-  const encryptedPassword = input.password ? await encryptPassword(input.password) : undefined;
   return mutateStore(store => {
     const index = store.accounts.findIndex(account => account.id === accountId);
     if (index === -1) return null;
@@ -1422,12 +1410,12 @@ export async function updatePlatformAccount(accountId: string, input: UpsertPlat
       handle: input.handle,
       loginIdentifier: input.loginIdentifier,
       loginConfirmation: input.loginConfirmation || undefined,
-      credentialConfigured: Boolean(input.password || store.accountSecrets[accountId]?.encryptedPassword || store.accountSecrets[accountId]?.password),
+      credentialConfigured: false,
       enabled: input.enabled ?? existing.enabled,
       updatedAt: nowIso()
     };
     store.accounts[index] = updated;
-    if (encryptedPassword) store.accountSecrets[accountId] = { encryptedPassword };
+    delete store.accountSecrets[accountId];
     return updated;
   });
 }

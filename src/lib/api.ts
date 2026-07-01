@@ -151,6 +151,9 @@ export const api = {
   deleteAccount: (accountId: string) =>
     request<void>(`/api/accounts/${accountId}`, { method: "DELETE" }),
 
+  startManualLogin: (accountId: string) =>
+    request<{ message: string; started: boolean }>(`/api/accounts/${accountId}/manual-login`, { method: "POST" }),
+
   users: () => request<UserProfile[]>("/api/users"),
 
   createUser: (payload: CreateUserProfileInput) =>

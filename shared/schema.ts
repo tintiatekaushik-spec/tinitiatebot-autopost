@@ -100,7 +100,6 @@ export const upsertPlatformAccountSchema = z.object({
   handle: z.string().trim().min(1, "Account handle is required"),
   loginIdentifier: z.string().trim().min(1, "Login email or username is required"),
   loginConfirmation: z.string().trim().optional(),
-  password: z.string().min(1, "Password is required").optional(),
   enabled: z.boolean().optional()
 });
 

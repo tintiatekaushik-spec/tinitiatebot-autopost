@@ -579,34 +579,23 @@ async function waitForLoginResult(page: Page, allowManualLoginFromStart = false,
 }
 
 export async function loginToInstagram(page: Page, _upload?: PlatformUpload, holdAfterLogin = true, accountLogin?: AccountLogin) {
-  const username = accountLogin?.identifier?.trim() || (process.env.INSTAGRAM_EMAIL ?? process.env.INSTAGRAM_USERNAME)?.trim();
-  const password = accountLogin?.password?.trim() || process.env.INSTAGRAM_PASSWORD?.trim();
   const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
-  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
-
-  if (!savedSessionOnly && !manualLoginOnly && (!username || !password)) {
-    throw new Error("Missing INSTAGRAM_EMAIL/INSTAGRAM_USERNAME or INSTAGRAM_PASSWORD in .env");
-  }
+  const manualLoginOnly = !savedSessionOnly;
 
   console.log(`Navigating to Instagram ${savedSessionOnly ? "home" : "login"} page...`);
   await page.goto(savedSessionOnly ? INSTAGRAM_HOME_URL : INSTAGRAM_LOGIN_URL, { timeout: 60000 });
   await page.waitForLoadState("domcontentloaded");
   await page.waitForTimeout(1000);
   await dismissCookiePrompt(page);
-  if (!savedSessionOnly && !manualLoginOnly) await clickLoginInterstitialLink(page);
 
   if (await isLoggedIn(page)) {
     console.log("Instagram session already active.");
   } else if (savedSessionOnly) {
-    throw new Error("Instagram saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
-  } else if (manualLoginOnly) {
-    console.log("Complete the full Instagram login manually in Chrome; bot will save the session after the account opens.");
-    await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
+    throw new Error("Instagram saved browser session is not active. Open this account's Login action and complete login before the scheduled publish time.");
   } else {
-    console.log("Filling Instagram credentials...");
-    await fillLoginForm(page, username!, password!);
-    console.log("Waiting for Instagram login to process...");
-    await waitForLoginResult(page);
+    console.log("Complete the full Instagram login manually in Chrome; bot will save the session after the account opens.");
+    await clickLoginInterstitialLink(page);
+    await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
   }
 
   await page.goto(INSTAGRAM_HOME_URL, { timeout: 60000 });

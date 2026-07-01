@@ -52,7 +52,7 @@ import {
   updateUserProfile,
   upsertLocalDriveStorageConnection
 } from "./storage";
-import { runAutomation } from "./services/publisher.js";
+import { runAutomation, startManualAccountSession } from "./services/publisher.js";
 import { startScheduler } from "./services/scheduler.js";
 import {
   connectPlatformFolder,
@@ -369,6 +369,31 @@ app.delete("/api/accounts/:id", requireRoles("operations_manager"), async (req: 
     }
     await logActivity(currentUser(req).id, "account.deleted", "publishing_account", account.id, `${account.displayName} account was deleted.`, { platform: account.platform, handle: account.handle });
     res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/accounts/:id/manual-login", requireRoles("operations_manager", "post_uploader"), async (req: RequestWithUser, res, next) => {
+  try {
+    const user = currentUser(req);
+    const { account, started } = await startManualAccountSession(pathParam(req.params.id, "id"));
+    await logActivity(
+      user.id,
+      started ? "account.manual_login_started" : "account.manual_login_already_running",
+      "publishing_account",
+      account.id,
+      started
+        ? `${account.displayName} manual login session was opened.`
+        : `${account.displayName} manual login session is already open.`,
+      { platform: account.platform, handle: account.handle },
+    );
+    res.status(202).json({
+      message: started
+        ? "Manual login window opened. Complete login in Chrome; the session will be saved and the window will close."
+        : "Manual login is already running for this account.",
+      started,
+    });
   } catch (error) {
     next(error);
   }

@@ -435,12 +435,8 @@ async function waitForLoginResult(page: Page, allowManualLoginFromStart = false,
 }
 
 export async function loginToLinkedIn(page: Page, _upload?: PlatformUpload, accountLogin?: AccountLogin) {
-  const email = accountLogin?.identifier?.trim() || process.env.LINKEDIN_EMAIL?.trim();
-  const password = accountLogin?.password?.trim() || process.env.LINKEDIN_PASSWORD?.trim();
   const savedSessionOnly = Boolean(accountLogin?.useSavedSessionOnly);
-  const manualLoginOnly = Boolean(accountLogin?.forceManualLogin);
-
-  if (!savedSessionOnly && !manualLoginOnly && (!email || !password)) throw new Error("Missing LINKEDIN_EMAIL or LINKEDIN_PASSWORD in .env");
+  const manualLoginOnly = !savedSessionOnly;
 
   console.log(`Navigating to LinkedIn ${savedSessionOnly ? "feed" : "login"} page...`);
   await page.goto(savedSessionOnly ? LINKEDIN_FEED_URL : LINKEDIN_LOGIN_URL, { timeout: 60000 });
@@ -451,15 +447,10 @@ export async function loginToLinkedIn(page: Page, _upload?: PlatformUpload, acco
   if (await isLoggedIn(page)) {
     console.log("LinkedIn session already active.");
   } else if (savedSessionOnly) {
-    throw new Error("LinkedIn saved browser session is not active. Run manual automation and complete login before the scheduled publish time.");
-  } else if (manualLoginOnly) {
+    throw new Error("LinkedIn saved browser session is not active. Open this account's Login action and complete login before the scheduled publish time.");
+  } else {
     console.log("Complete the full LinkedIn login manually in Chrome; bot will save the session after the account opens.");
     await waitForLoginResult(page, true, Boolean(accountLogin?.ignoreLoginErrors));
-  } else {
-    console.log("Filling LinkedIn credentials...");
-    await fillLoginForm(page, email!, password!);
-    console.log("Waiting for LinkedIn login to process...");
-    await waitForLoginResult(page);
   }
 
   await page.goto(LINKEDIN_FEED_URL, { timeout: 60000 });

@@ -129,7 +129,7 @@ That endpoint returns queued uploads grouped like this:
 ## Storage
 
 - Upload metadata is stored in `data/store.json`.
-- Account passwords are encrypted at rest. The machine-local key is stored in the ignored `data/account-secret.key` file, or can be supplied with `LOCAL_ACCOUNT_SECRET_KEY`.
+- Platform account sessions are created manually in Chrome and saved under `browser-data/accounts/`; scheduled publishing reuses those saved sessions only.
 - Passwords are never returned by the account API.
 - Uploaded files are stored in `uploads/`.
 - Shared TypeScript/Zod contracts live in `shared/schema.ts`.
